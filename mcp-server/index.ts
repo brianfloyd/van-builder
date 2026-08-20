@@ -26,7 +26,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { ComponentDef, PlacedInstance, ProjectState, Vec3 } from '../src/types.js';
+import type { ComponentDef, PlacedInstance, ProjectState, Vec3, Category } from '../src/types.js';
+import { CATEGORIES } from '../src/types.js';
 import * as ops from '../src/projectOps.js';
 import { readProject, writeProject, saveVariant, loadVariant, listVariants } from './projectFile.js';
 
@@ -53,6 +54,7 @@ function describeInstance(project: ProjectState, inst: PlacedInstance) {
     pos: inst.pos,
     rotationY: inst.rotationY,
     locked: inst.locked ?? false,
+    doorId: def?.mountSurface === 'door' ? inst.doorId ?? 'rear-left' : undefined,
   };
 }
 
@@ -86,6 +88,10 @@ server.tool(
         mountSurface: d.mountSurface ?? 'floor',
         dims: d.dims,
         overlapGroup: d.overlapGroup,
+        estCost: d.estCost,
+        status: d.status ?? 'final',
+        notes: d.notes,
+        placedCount: project.instances.filter((i) => i.defId === d.id).length,
       })),
     });
   }
@@ -111,10 +117,103 @@ server.tool(
   }
 );
 
+const categorySchema = z.enum([
+  'structure', 'bed', 'seating', 'kitchen', 'sink', 'vanity', 'shower', 'toilet',
+  'storage', 'cabinet', 'appliance', 'electrical', 'water', 'plumbing', 'lighting', 'roof', 'other',
+]);
+const statusSchema = z.enum(['final', 'placeholder']);
+const mountSurfaceSchema = z.enum(['floor', 'roof', 'underbody', 'door']);
+const doorIdSchema = z.enum(['rear-left', 'rear-right']);
+
+function describeDef(project: ProjectState, def: ComponentDef) {
+  return {
+    id: def.id,
+    name: def.name,
+    category: def.category,
+    mountSurface: def.mountSurface ?? 'floor',
+    dims: def.dims,
+    overlapGroup: def.overlapGroup,
+    estCost: def.estCost,
+    status: def.status ?? 'final',
+    notes: def.notes,
+    placedCount: project.instances.filter((i) => i.defId === def.id).length,
+  };
+}
+
+server.tool(
+  'add_def',
+  'Add a new component type to the catalog — for a part that isn\'t one of the built-in starter ' +
+    'components (a specific brand/model, or anything not covered yet). Dims/cost can be exact or a ' +
+    'placeholder guess — set status to "placeholder" when they\'re not locked in yet so it\'s clear ' +
+    'this needs follow-up before the build blueprint is final. Does not place an instance of it — ' +
+    'follow with place_item/place_items.',
+  {
+    name: z.string().min(1),
+    category: categorySchema,
+    dims: z.object({ w: z.number().positive(), d: z.number().positive(), h: z.number().positive() })
+      .describe('Footprint at rotation 0, inches: w = across width, d = along length, h = up.'),
+    mountSurface: mountSurfaceSchema.optional().describe(
+      'Defaults to "floor" if omitted. "door" mounts to a rear door panel — it swings open with the ' +
+        'door in the 3D view and is auto-clamped flush against it (see place_item\'s doorId param).'
+    ),
+    estCost: z.number().min(0).optional().describe('Estimated unit cost in USD. Omit if not priced yet.'),
+    status: statusSchema.optional().default('placeholder')
+      .describe('"final" once name/dims/cost are locked in; defaults to "placeholder".'),
+    notes: z.string().optional(),
+    overlapGroup: z.string().optional()
+      .describe('Instances of defs sharing this group are treated as alternates and may overlap each other (e.g. two sink options on one footprint).'),
+  },
+  async (args): Promise<CallToolResult> => {
+    const project = readProject();
+    const { project: next, id } = ops.addDef(project, {
+      name: args.name,
+      category: args.category,
+      dims: args.dims,
+      mountSurface: args.mountSurface,
+      estCost: args.estCost,
+      status: args.status,
+      notes: args.notes,
+      overlapGroup: args.overlapGroup,
+    });
+    writeProject(next);
+    const def = next.defs.find((d) => d.id === id)!;
+    return ok({ def: describeDef(next, def) });
+  }
+);
+
+server.tool(
+  'update_def',
+  'Patch an existing catalog component (e.g. fill in a real model\'s dims/cost once known, rename ' +
+    'from a placeholder to a final name, or flip status to "final"). Only the fields you pass ' +
+    'change. Existing placed instances of this def keep their position — dims changes affect their ' +
+    'footprint in future conflict checks.',
+  {
+    id: z.string(),
+    name: z.string().min(1).optional(),
+    category: categorySchema.optional(),
+    dims: z.object({ w: z.number().positive(), d: z.number().positive(), h: z.number().positive() }).optional(),
+    mountSurface: mountSurfaceSchema.optional(),
+    estCost: z.number().min(0).optional(),
+    status: statusSchema.optional(),
+    notes: z.string().optional(),
+    overlapGroup: z.string().optional(),
+  },
+  async ({ id, ...patch }): Promise<CallToolResult> => {
+    const project = readProject();
+    if (!project.defs.some((d) => d.id === id)) {
+      return fail(`No component def with id "${id}". Call list_catalog for valid ids.`);
+    }
+    const next = ops.updateDef(project, id, patch);
+    writeProject(next);
+    const def = next.defs.find((d) => d.id === id)!;
+    return ok({ def: describeDef(next, def), violations: ops.getViolations(next) });
+  }
+);
+
 const placeItemShape = {
   componentId: z.string().describe('A def id from list_catalog.'),
   plane: z
-    .enum(['floor', 'roof', 'underbody'])
+    .enum(['floor', 'roof', 'underbody', 'door'])
     .optional()
     .describe(
       'Optional sanity check, not a placement choice — each component already has a fixed mount ' +
@@ -122,15 +221,16 @@ const placeItemShape = {
         'call fails with an error instead of silently placing it on the wrong plane.'
     ),
   x: z.number().describe('Footprint center, inches from the left wall (x=0).'),
-  y: z.number().describe('Base height, inches. 0 = that plane\'s floor (van floor for "floor", roof surface for "roof", van floor underside for "underbody", where negative values go further down).'),
-  z: z.number().describe('Footprint center, inches from the front/cab wall (z=0).'),
+  y: z.number().describe('Base height, inches. 0 = that plane\'s floor (van floor for "floor", roof surface for "roof", van floor underside for "underbody", height on the door panel for "door"), where negative values go further down.'),
+  z: z.number().describe('Footprint center, inches from the front/cab wall (z=0). For "door" components this is IGNORED — it\'s auto-computed so the item sits flush against the door; pass x/y as if the door were closed.'),
+  doorId: doorIdSchema.optional().describe('Which rear door panel to mount on — only used when the component\'s mountSurface is "door" (defaults to "rear-left" if omitted). Ignored otherwise. An item can\'t straddle both panels.'),
   rotation: rotationSchema.optional().default(0).describe('Yaw in degrees, one of 0/90/180/270.'),
   label: z.string().optional().describe('Optional display label override for this instance.'),
 };
 
 function placeOne(
   project: ProjectState,
-  args: { componentId: string; plane?: string; x: number; y: number; z: number; rotation?: number; label?: string }
+  args: { componentId: string; plane?: string; x: number; y: number; z: number; doorId?: 'rear-left' | 'rear-right'; rotation?: number; label?: string }
 ): { project: ProjectState; result: unknown; error?: string } {
   const def = project.defs.find((d) => d.id === args.componentId);
   if (!def) {
@@ -145,7 +245,7 @@ function placeOne(
     };
   }
   const rotationY = (args.rotation ?? 0) as 0 | 90 | 180 | 270;
-  const placed = ops.placeInstanceAt(project, args.componentId, { x: args.x, y: args.y, z: args.z }, rotationY);
+  const placed = ops.placeInstanceAt(project, args.componentId, { x: args.x, y: args.y, z: args.z }, rotationY, args.doorId);
   if ('error' in placed) return { project, result: null, error: placed.error };
   let next = placed.project;
   if (args.label) next = ops.updateInstance(next, placed.instance.id, { label: args.label });
@@ -197,21 +297,25 @@ server.tool(
 server.tool(
   'move_item',
   'Move and/or rotate an existing placed instance. Only the fields you pass change — omit x/y/z/' +
-    'rotation to leave them as-is. Same coordinate convention as place_item.',
+    'rotation/doorId to leave them as-is. Same coordinate convention as place_item. For a "door"-' +
+    'mount instance, z is always auto-corrected back to flush-against-the-door regardless of what ' +
+    'you pass — it physically can\'t be moved away from the mounting surface.',
   {
     instanceId: z.string(),
     x: z.number().optional(),
     y: z.number().optional(),
     z: z.number().optional(),
+    doorId: doorIdSchema.optional().describe('Switch which rear door panel a "door"-mount instance rides on.'),
     rotation: rotationSchema.optional(),
   },
-  async ({ instanceId, x, y, z, rotation }): Promise<CallToolResult> => {
+  async ({ instanceId, x, y, z, doorId, rotation }): Promise<CallToolResult> => {
     const project = readProject();
     const inst = project.instances.find((i) => i.id === instanceId);
     if (!inst) return fail(`No placed instance with id "${instanceId}". Call get_layout for valid ids.`);
     const pos: Vec3 = { x: x ?? inst.pos.x, y: y ?? inst.pos.y, z: z ?? inst.pos.z };
     const patch: Partial<Omit<PlacedInstance, 'id'>> = { pos };
     if (rotation !== undefined) patch.rotationY = rotation;
+    if (doorId !== undefined) patch.doorId = doorId;
     const next = ops.updateInstance(project, instanceId, patch);
     writeProject(next);
     const updated = next.instances.find((i) => i.id === instanceId)!;
@@ -264,6 +368,31 @@ server.tool(
       moved: result.moved,
       instance: describeInstance(result.project, updated),
       violations: violationsFor(result.project, instanceId),
+    });
+  }
+);
+
+server.tool(
+  'get_clearances',
+  'Get the distance in inches from a placed item to the nearest obstacle or envelope wall in each ' +
+    'of the 6 directions (left/right = across width, forward/back = toward cab/rear, up/down = ' +
+    'height) — the exact same swept-distance query the app\'s toggleable clearance gauges show. Use ' +
+    'this to verify practical operating room (walkway width, room to open a door/drawer, headroom) ' +
+    'after placing items — check_conflicts only tells you yes/no on hard collisions, not how much ' +
+    'space is actually left. Omit instanceId to get clearances for every placed item at once.',
+  { instanceId: z.string().optional() },
+  async ({ instanceId }): Promise<CallToolResult> => {
+    const project = readProject();
+    if (instanceId) {
+      const inst = project.instances.find((i) => i.id === instanceId);
+      if (!inst) return fail(`No placed instance with id "${instanceId}". Call get_layout for valid ids.`);
+      return ok({ instance: describeInstance(project, inst), clearances: ops.getClearances(project, instanceId) });
+    }
+    return ok({
+      results: project.instances.map((inst) => ({
+        instance: describeInstance(project, inst),
+        clearances: ops.getClearances(project, inst.id),
+      })),
     });
   }
 );
@@ -338,6 +467,244 @@ server.tool(
   {},
   async (): Promise<CallToolResult> => {
     return ok({ variants: listVariants() });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Build checklist import/export — a Markdown table is the exchange format
+// (see docs/checklist-template.md) between whatever tracked the parts list
+// (another chat, a spec sheet) and this project's live catalog + layout.
+// ---------------------------------------------------------------------------
+
+interface ChecklistRow {
+  category: string;
+  item: string;
+  qty: number;
+  w: number | null;
+  d: number | null;
+  h: number | null;
+  mountSurface: string | null;
+  cost: number | null;
+  status: string | null;
+  notes: string;
+}
+
+const HEADER_ALIASES: Record<string, keyof ChecklistRow | 'skip'> = {
+  category: 'category',
+  item: 'item', name: 'item',
+  qty: 'qty', quantity: 'qty',
+  w: 'w', width: 'w',
+  d: 'd', depth: 'd', length: 'd',
+  h: 'h', height: 'h',
+  mountsurface: 'mountSurface', mount: 'mountSurface', surface: 'mountSurface',
+  cost: 'cost', price: 'cost', estcost: 'cost',
+  status: 'status',
+  notes: 'notes', note: 'notes',
+};
+
+function splitTableRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  return t.split('|').map((c) => c.trim());
+}
+
+function isSeparatorRow(cells: string[]): boolean {
+  return cells.length > 0 && cells.every((c) => c === '' || /^:?-+:?$/.test(c));
+}
+
+/** Parses every pipe-table in the markdown (header row immediately followed
+ * by a `---` separator row establishes column order for the rows after it,
+ * until the next such header is seen). Column order and extra/missing
+ * optional columns are tolerant; only "category" and "item" are required. */
+function parseChecklist(markdown: string): { rows: ChecklistRow[]; warnings: string[] } {
+  const lines = markdown.split(/\r?\n/);
+  const rows: ChecklistRow[] = [];
+  const warnings: string[] = [];
+  let columnMap: (keyof ChecklistRow | 'skip' | null)[] | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/^\s*\|.*\|\s*$/.test(line)) continue;
+    const cells = splitTableRow(line);
+    const next = lines[i + 1];
+    const nextIsSeparator = next && /^\s*\|.*\|\s*$/.test(next) && isSeparatorRow(splitTableRow(next));
+
+    if (nextIsSeparator) {
+      columnMap = cells.map((h) => HEADER_ALIASES[h.toLowerCase().replace(/[^a-z]/g, '')] ?? null);
+      if (!columnMap.includes('category') || !columnMap.includes('item')) {
+        warnings.push(`Table header at line ${i + 1} is missing a "Category" or "Item" column — skipping this table.`);
+        columnMap = null;
+      }
+      i++; // consume the separator row too
+      continue;
+    }
+    if (isSeparatorRow(cells)) continue; // stray separator with no preceding header
+    if (!columnMap) continue; // data row before any recognized header — ignore
+
+    const get = (key: keyof ChecklistRow): string => {
+      const idx = columnMap!.indexOf(key);
+      return idx >= 0 && idx < cells.length ? cells[idx] : '';
+    };
+    const item = get('item');
+    if (!item) continue;
+
+    const parseNum = (s: string): number | null => {
+      const cleaned = s.replace(/[$,]/g, '').trim();
+      if (!cleaned || /^tbd$/i.test(cleaned)) return null;
+      const n = Number(cleaned);
+      return Number.isFinite(n) ? n : null;
+    };
+    const qtyRaw = parseNum(get('qty'));
+
+    rows.push({
+      category: get('category').toLowerCase(),
+      item,
+      qty: qtyRaw && qtyRaw > 0 ? Math.round(qtyRaw) : 1,
+      w: parseNum(get('w')),
+      d: parseNum(get('d')),
+      h: parseNum(get('h')),
+      mountSurface: get('mountSurface').toLowerCase() || null,
+      cost: parseNum(get('cost')),
+      status: get('status').toLowerCase() || null,
+      notes: get('notes'),
+    });
+  }
+  return { rows, warnings };
+}
+
+server.tool(
+  'import_checklist',
+  'Import a build checklist written in the Markdown table format from docs/checklist-template.md ' +
+    '(Category | Item | Qty | W | D | H | MountSurface | Cost | Status | Notes — column order and ' +
+    'omitted optional columns are tolerant; use "TBD" or leave a cell blank for anything not decided ' +
+    'yet). For each row: matches an existing catalog component by exact (case-insensitive) name and ' +
+    'reuses/updates it, or creates a new one via add_def if no match exists; then tops up placed ' +
+    'instances to the row\'s Qty using rough auto-placement (corner-staggered, NOT spacing-checked — ' +
+    'follow up with get_clearances/move_item to arrange things properly). Rows already at or above ' +
+    'their requested Qty add nothing. Returns which defs were created/updated, how many instances ' +
+    'were added, and a needsInput list of rows still missing dims/cost/final-status — a checklist of ' +
+    'what to prompt the user for next. Safe to call multiple times as the source list grows: re-running ' +
+    'it does not duplicate instances already at their target Qty, but WILL add more if Qty increased.',
+  { markdown: z.string().min(1) },
+  async ({ markdown }): Promise<CallToolResult> => {
+    let project = readProject();
+    const { rows, warnings } = parseChecklist(markdown);
+    if (rows.length === 0) {
+      return fail('No parseable checklist rows found. Expect a Markdown table with "Category" and "Item" columns — see docs/checklist-template.md.' + (warnings.length ? ' ' + warnings.join(' ') : ''));
+    }
+
+    const createdDefs: unknown[] = [];
+    const updatedDefs: unknown[] = [];
+    let instancesAdded = 0;
+    const needsInput: unknown[] = [];
+    const skipped: unknown[] = [];
+
+    for (const row of rows) {
+      const category = (CATEGORIES as readonly string[]).includes(row.category) ? (row.category as Category) : 'other';
+      if (category !== row.category && row.category) {
+        warnings.push(`"${row.item}": unrecognized category "${row.category}" — filed under "other".`);
+      }
+      const mountSurface =
+        row.mountSurface && ['floor', 'roof', 'underbody', 'door'].includes(row.mountSurface)
+          ? (row.mountSurface as 'floor' | 'roof' | 'underbody' | 'door')
+          : undefined;
+
+      let def = project.defs.find((d) => d.name.toLowerCase() === row.item.toLowerCase());
+      const dimsGiven = row.w != null && row.d != null && row.h != null;
+      const rowStatus: 'final' | 'placeholder' | undefined =
+        row.status === 'final' ? 'final' : row.status === 'placeholder' ? 'placeholder' : undefined;
+      // Only true when THIS call is the one inventing the 12x12x12 stand-in —
+      // an existing matched def keeps whatever dims it already had, which are
+      // not a placeholder just because this row's W/D/H cells were left blank.
+      let dimsArePlaceholder = false;
+
+      if (def) {
+        const patch: Partial<ComponentDef> = {};
+        if (dimsGiven) patch.dims = { w: row.w!, d: row.d!, h: row.h! };
+        if (row.cost != null) patch.estCost = row.cost;
+        if (rowStatus) patch.status = rowStatus;
+        if (row.notes) patch.notes = row.notes;
+        if (mountSurface) patch.mountSurface = mountSurface;
+        if (Object.keys(patch).length > 0) {
+          project = ops.updateDef(project, def.id, patch);
+          def = project.defs.find((d) => d.id === def!.id)!;
+          updatedDefs.push(describeDef(project, def));
+        }
+      } else {
+        const created = ops.addDef(project, {
+          name: row.item,
+          category,
+          dims: dimsGiven ? { w: row.w!, d: row.d!, h: row.h! } : { w: 12, d: 12, h: 12 },
+          mountSurface,
+          estCost: row.cost ?? undefined,
+          status: rowStatus ?? (dimsGiven && row.cost != null ? 'final' : 'placeholder'),
+          notes: row.notes || undefined,
+        });
+        project = created.project;
+        def = project.defs.find((d) => d.id === created.id)!;
+        dimsArePlaceholder = !dimsGiven;
+        if (dimsArePlaceholder) warnings.push(`"${row.item}": no dims given — created with a 12x12x12" placeholder footprint.`);
+        createdDefs.push(describeDef(project, def));
+      }
+
+      const finalDef = def!;
+      const existingCount = project.instances.filter((i) => i.defId === finalDef.id).length;
+      const toAdd = row.qty - existingCount;
+      for (let n = 0; n < toAdd; n++) {
+        const placed = ops.addInstance(project, finalDef.id);
+        if ('error' in placed) { warnings.push(`"${row.item}": ${placed.error}`); break; }
+        project = placed.project;
+        instancesAdded++;
+      }
+      if (toAdd <= 0 && existingCount > row.qty) {
+        skipped.push({ item: row.item, note: `${existingCount} already placed, more than requested Qty ${row.qty} — none removed.` });
+      }
+
+      const missing = [
+        dimsArePlaceholder ? 'dims (currently a 12x12x12" placeholder)' : null,
+        finalDef.estCost == null ? 'cost' : null,
+        (finalDef.status ?? 'final') !== 'final' ? 'final name/status confirmation' : null,
+      ].filter((m): m is string => m !== null);
+      if (missing.length > 0) {
+        needsInput.push({ defId: finalDef.id, name: finalDef.name, category: finalDef.category, dims: finalDef.dims, missing });
+      }
+    }
+
+    writeProject(project);
+    return ok({
+      rowsParsed: rows.length,
+      createdDefs,
+      updatedDefs,
+      instancesAdded,
+      skipped,
+      needsInput,
+      warnings,
+      violations: ops.getViolations(project),
+    });
+  }
+);
+
+server.tool(
+  'export_checklist',
+  'Render the current live catalog + placed counts as a Markdown checklist table in the same ' +
+    'format import_checklist reads (docs/checklist-template.md) — the running "what have we ' +
+    'covered" blueprint. Includes every catalog def, even ones with zero placed instances yet ' +
+    '(Qty 0 = planned but not placed).',
+  {},
+  async (): Promise<CallToolResult> => {
+    const project = readProject();
+    const header = '| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | Notes |';
+    const sep = '|---|---|---|---|---|---|---|---|---|---|';
+    const lines = [header, sep];
+    for (const d of [...project.defs].sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))) {
+      const qty = project.instances.filter((i) => i.defId === d.id).length;
+      const cost = d.estCost != null ? String(d.estCost) : 'TBD';
+      lines.push(
+        `| ${d.category} | ${d.name} | ${qty} | ${d.dims.w} | ${d.dims.d} | ${d.dims.h} | ${d.mountSurface ?? 'floor'} | ${cost} | ${d.status ?? 'final'} | ${d.notes ?? ''} |`
+      );
+    }
+    return ok({ markdown: lines.join('\n'), defCount: project.defs.length, totalInstances: project.instances.length });
   }
 );
 

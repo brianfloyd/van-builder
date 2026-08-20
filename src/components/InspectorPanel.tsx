@@ -15,10 +15,12 @@ export default function InspectorPanel() {
   const clearances = useStore((s) => (selectedId ? s.clearances(selectedId) : null));
   const showClearances = useStore((s) => s.showClearances);
   const toggleClearances = useStore((s) => s.toggleClearances);
+  const doorsOpen = useStore((s) => s.doorsOpen);
 
   const selected = instances.find((i) => i.id === selectedId) ?? null;
   const def = selected ? defsById[selected.defId] : null;
   const selectedViolations = selected ? violations.filter((v) => v.instanceIds.includes(selected.id)) : [];
+  const isDoorMount = def?.mountSurface === 'door';
 
   function handleResolve() {
     if (!selected) return;
@@ -48,7 +50,24 @@ export default function InspectorPanel() {
               />
             </div>
 
-            <div className="hint">Position (in) — X: width, Y: height off floor, Z: length</div>
+            {isDoorMount && (
+              <div className="field-row">
+                <label>Door panel</label>
+                <select
+                  value={selected.doorId ?? 'rear-left'}
+                  onChange={(e) => updateInstance(selected.id, { doorId: e.target.value as 'rear-left' | 'rear-right' })}
+                >
+                  <option value="rear-left">Left rear door</option>
+                  <option value="rear-right">Right rear door</option>
+                </select>
+              </div>
+            )}
+
+            <div className="hint">
+              {isDoorMount
+                ? 'Position (in) — X: side-to-side on the door, Y: height on the door. Z is locked flush against the door — it can\'t be moved away from touching it.'
+                : 'Position (in) — X: width, Y: height off floor, Z: length'}
+            </div>
             <div className="field-row">
               <label>X</label>
               <input
@@ -74,11 +93,19 @@ export default function InspectorPanel() {
               <input
                 type="number"
                 value={selected.pos.z}
+                disabled={isDoorMount}
+                title={isDoorMount ? 'Locked — exterior-mounted items stay flush against the door' : undefined}
                 onChange={(e) =>
                   updateInstance(selected.id, { pos: { ...selected.pos, z: parseFloat(e.target.value) || 0 } })
                 }
               />
             </div>
+            {isDoorMount && doorsOpen.rear && (
+              <div className="hint" style={{ color: '#ffd166' }}>
+                ⚠ Rear doors are open — drag-to-move in the 3D view is disabled while open (the X/Y fields above
+                still work). Close the doors from the Van Features panel to drag it directly.
+              </div>
+            )}
 
             <div className="hint">Move (± {GRID_SNAP}") — floor plane, and height</div>
             <div className="dpad-row">

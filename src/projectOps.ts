@@ -11,17 +11,36 @@
 // here needs to be extracted or rewritten to get there.
 
 import { v4 as uuid } from 'uuid';
-import type { ComponentDef, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
+import type { ComponentDef, DoorId, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
 import {
   clamp,
+  clampToDoorPanel,
   computeClearances,
+  computeDoorEnvelope,
   envelopeFor,
   findNearestValidPosition,
   findViolations,
+  requiredDoorTouchZ,
+  rotatedDims,
   snap,
   type Clearances,
   type Violation,
 } from './geometry';
+
+/** Door-mount instances must stay flush against their panel — this re-clamps
+ * X/Y into the panel bounds and forces Z back to the touching position after
+ * ANY change to a door-mount instance's position, rotation, or doorId. Not
+ * just a validity check: the constraint is enforced here so "moved away from
+ * the exterior" is unreachable, not just flagged red. No-op for every other
+ * mount surface. */
+function reclampDoorInstance(project: ProjectState, inst: PlacedInstance): PlacedInstance {
+  const def = project.defs.find((d) => d.id === inst.defId);
+  if (!def || (def.mountSurface ?? 'floor') !== 'door') return inst;
+  const doorId: DoorId = inst.doorId ?? 'rear-left';
+  const dims = rotatedDims(def.dims, inst.rotationY);
+  const pos = clampToDoorPanel(project.shell, doorId, dims, inst.pos);
+  return { ...inst, doorId, pos };
+}
 
 export const GRID_SNAP = 0.5; // inches — shared placement/nudge grid
 
@@ -114,6 +133,24 @@ export interface OpError {
 export function addInstance(project: ProjectState, defId: string): InstanceResult | OpError {
   const def = project.defs.find((d) => d.id === defId);
   if (!def) return { error: `No component def with id "${defId}"` };
+
+  if ((def.mountSurface ?? 'floor') === 'door') {
+    const doorId: DoorId = 'rear-left';
+    const count = project.instances.filter((i) => i.defId === defId && (i.doorId ?? 'rear-left') === doorId).length;
+    const env = computeDoorEnvelope(project.shell, doorId, def.dims.d);
+    const halfW = def.dims.w / 2;
+    const cx = clamp(env.minX + halfW + count * 4, env.minX + halfW, Math.max(env.minX + halfW, env.maxX - halfW));
+    const z = requiredDoorTouchZ(project.shell, def.dims.d);
+    const instance: PlacedInstance = {
+      id: uuid(),
+      defId,
+      pos: { x: snap(cx, GRID_SNAP), y: snap(env.minY, GRID_SNAP), z },
+      rotationY: 0,
+      doorId,
+    };
+    return { project: { ...project, instances: [...project.instances, instance] }, instance };
+  }
+
   const env = envelopeFor(project.shell, def.mountSurface);
   const count = project.instances.filter((i) => i.defId === defId).length;
   const w = def.dims.w;
@@ -147,11 +184,14 @@ export function placeInstanceAt(
   project: ProjectState,
   defId: string,
   pos: Vec3,
-  rotationY: 0 | 90 | 180 | 270 = 0
+  rotationY: 0 | 90 | 180 | 270 = 0,
+  doorId?: DoorId
 ): InstanceResult | OpError {
   const def = project.defs.find((d) => d.id === defId);
   if (!def) return { error: `No component def with id "${defId}"` };
-  const instance: PlacedInstance = { id: uuid(), defId, pos, rotationY };
+  let instance: PlacedInstance = { id: uuid(), defId, pos, rotationY };
+  if ((def.mountSurface ?? 'floor') === 'door') instance.doorId = doorId ?? 'rear-left';
+  instance = reclampDoorInstance(project, instance);
   return { project: { ...project, instances: [...project.instances, instance] }, instance };
 }
 
@@ -160,7 +200,10 @@ export function updateInstance(
   id: string,
   patch: Partial<Omit<PlacedInstance, 'id'>>
 ): ProjectState {
-  return { ...project, instances: project.instances.map((i) => (i.id === id ? { ...i, ...patch } : i)) };
+  return {
+    ...project,
+    instances: project.instances.map((i) => (i.id === id ? reclampDoorInstance(project, { ...i, ...patch }) : i)),
+  };
 }
 
 export function moveInstanceDelta(project: ProjectState, id: string, delta: Partial<Vec3>): ProjectState {
@@ -168,14 +211,12 @@ export function moveInstanceDelta(project: ProjectState, id: string, delta: Part
     ...project,
     instances: project.instances.map((i) => {
       if (i.id !== id) return i;
-      return {
-        ...i,
-        pos: {
-          x: snap(i.pos.x + (delta.x ?? 0), GRID_SNAP),
-          y: snap(i.pos.y + (delta.y ?? 0), GRID_SNAP),
-          z: snap(i.pos.z + (delta.z ?? 0), GRID_SNAP),
-        },
+      const pos: Vec3 = {
+        x: snap(i.pos.x + (delta.x ?? 0), GRID_SNAP),
+        y: snap(i.pos.y + (delta.y ?? 0), GRID_SNAP),
+        z: snap(i.pos.z + (delta.z ?? 0), GRID_SNAP),
       };
+      return reclampDoorInstance(project, { ...i, pos });
     }),
   };
 }
@@ -187,7 +228,11 @@ export function removeInstance(project: ProjectState, id: string): ProjectState 
 export function duplicateInstance(project: ProjectState, id: string): InstanceResult | OpError {
   const src = project.instances.find((i) => i.id === id);
   if (!src) return { error: `No placed instance with id "${id}"` };
-  const copy: PlacedInstance = { ...src, id: uuid(), pos: { x: src.pos.x + 2, y: src.pos.y, z: src.pos.z + 2 } };
+  const copy = reclampDoorInstance(project, {
+    ...src,
+    id: uuid(),
+    pos: { x: src.pos.x + 2, y: src.pos.y, z: src.pos.z + 2 },
+  });
   return { project: { ...project, instances: [...project.instances, copy] }, instance: copy };
 }
 

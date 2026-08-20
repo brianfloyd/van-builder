@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import * as THREE from 'three';
 import type { VanShell } from '../types';
-import { computeCabZone } from '../geometry';
+import { computeCabZone, REAR_DOOR_THICKNESS, REAR_DOOR_OPEN_ANGLE_DEG } from '../geometry';
 
 const CAB_COLOR = '#ffb703';
 const SEAT_COLOR = '#3a3a3a';
@@ -76,9 +76,9 @@ function RearDoorPanel({
   openSign: 1 | -1;
   open: boolean;
 }) {
-  const thickness = 1.5;
+  const thickness = REAR_DOOR_THICKNESS;
   const geo = useMemo(() => new THREE.BoxGeometry(width, height, thickness), [width, height]);
-  const openAngle = open ? openSign * ((100 * Math.PI) / 180) : 0;
+  const openAngle = open ? openSign * ((REAR_DOOR_OPEN_ANGLE_DEG * Math.PI) / 180) : 0;
   const localX = -openSign * (width / 2); // panel extends away from hinge toward the van's centerline when closed
 
   return (

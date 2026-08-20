@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { CATEGORIES, CATEGORY_COLORS } from '../types';
 import type { Category, MountSurface } from '../types';
@@ -10,6 +10,7 @@ export default function CatalogPanel() {
   const removeDef = useStore((s) => s.removeDef);
   const addInstance = useStore((s) => s.addInstance);
   const instances = useStore((s) => s.instances);
+  const selectedInstanceId = useStore((s) => s.selectedInstanceId);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
@@ -22,6 +23,18 @@ export default function CatalogPanel() {
     h: 12,
     overlapGroup: '',
   });
+  const itemRefs = useRef(new Map<string, HTMLDivElement>());
+
+  // Selecting an item in the 3D view (or the Placed Items list) jumps the
+  // catalog to its component type, opens it for editing, and scrolls it
+  // into view — so name/size/cost/etc are one click away from the 3D pick.
+  useEffect(() => {
+    if (!selectedInstanceId) return;
+    const inst = instances.find((i) => i.id === selectedInstanceId);
+    if (!inst) return;
+    setEditingId(inst.defId);
+    itemRefs.current.get(inst.defId)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selectedInstanceId, instances]);
 
   function resetForm() {
     setForm({ name: '', category: 'other', mountSurface: 'floor', w: 12, d: 12, h: 12, overlapGroup: '' });
@@ -47,37 +60,48 @@ export default function CatalogPanel() {
         {defs.map((d) => {
           const usageCount = instances.filter((i) => i.defId === d.id).length;
           const editing = editingId === d.id;
+          const pickedFrom3d = instances.find((i) => i.id === selectedInstanceId)?.defId === d.id;
           return (
-            <div key={d.id}>
-              <div className={`catalog-item ${editing ? 'selected' : ''}`}>
+            <div
+              key={d.id}
+              ref={(el) => {
+                if (el) itemRefs.current.set(d.id, el);
+                else itemRefs.current.delete(d.id);
+              }}
+            >
+              <div className={`catalog-item ${editing ? 'selected' : ''} ${pickedFrom3d && !editing ? 'picked' : ''}`}>
                 <span className="swatch" style={{ background: d.color ?? CATEGORY_COLORS[d.category] }} />
-                <span className="name" title={d.name}>
-                  {d.name}
-                </span>
-                {d.mountSurface === 'roof' && <span className="roof-badge">roof</span>}
-                {d.mountSurface === 'underbody' && <span className="roof-badge underbody-badge">underbody</span>}
-                <span className="dims">
-                  {d.dims.w}×{d.dims.d}×{d.dims.h}"
-                </span>
-                <button className="icon-btn" title="Add to van" onClick={() => addInstance(d.id)}>
-                  ＋
-                </button>
-                <button className="icon-btn" title="Edit" onClick={() => setEditingId(editing ? null : d.id)}>
-                  ✎
-                </button>
-                <button
-                  className="icon-btn"
-                  title={usageCount > 0 ? `Delete (${usageCount} placed will be removed)` : 'Delete'}
-                  onClick={() => {
-                    const msg =
-                      usageCount > 0
-                        ? `Delete "${d.name}"? This will also remove ${usageCount} placed instance(s) from the van.`
-                        : `Delete "${d.name}"?`;
-                    if (confirm(msg)) removeDef(d.id);
-                  }}
-                >
-                  ✕
-                </button>
+                <div className="catalog-item-main">
+                  <div className="catalog-item-name-row">
+                    <span className="name">{d.name}</span>
+                    {d.mountSurface === 'roof' && <span className="roof-badge">roof</span>}
+                    {d.mountSurface === 'underbody' && <span className="roof-badge underbody-badge">underbody</span>}
+                  </div>
+                  <span className="dims">
+                    {d.dims.w}×{d.dims.d}×{d.dims.h}"
+                  </span>
+                </div>
+                <div className="catalog-item-actions">
+                  <button className="icon-btn" title="Add to van" onClick={() => addInstance(d.id)}>
+                    ＋
+                  </button>
+                  <button className="icon-btn" title="Edit" onClick={() => setEditingId(editing ? null : d.id)}>
+                    ✎
+                  </button>
+                  <button
+                    className="icon-btn"
+                    title={usageCount > 0 ? `Delete (${usageCount} placed will be removed)` : 'Delete'}
+                    onClick={() => {
+                      const msg =
+                        usageCount > 0
+                          ? `Delete "${d.name}"? This will also remove ${usageCount} placed instance(s) from the van.`
+                          : `Delete "${d.name}"?`;
+                      if (confirm(msg)) removeDef(d.id);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
               {editing && (
                 <div className="add-form" style={{ padding: '6px 8px 10px 8px' }}>
@@ -145,12 +169,52 @@ export default function CatalogPanel() {
                     />
                   </div>
                   <div className="field-row">
+                    <label>Est. cost (USD)</label>
+                    <input
+                      type="number"
+                      placeholder="unpriced"
+                      value={d.estCost ?? ''}
+                      onChange={(e) =>
+                        updateDef(d.id, { estCost: e.target.value === '' ? undefined : parseFloat(e.target.value) || 0 })
+                      }
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label>Status</label>
+                    <select
+                      value={d.status ?? 'final'}
+                      onChange={(e) => updateDef(d.id, { status: e.target.value as 'final' | 'placeholder' })}
+                    >
+                      <option value="final">Final</option>
+                      <option value="placeholder">Placeholder</option>
+                    </select>
+                  </div>
+                  <div className="field-row">
                     <label>Overlap group</label>
                     <input
                       type="text"
                       placeholder="e.g. sink-option"
                       value={d.overlapGroup ?? ''}
                       onChange={(e) => updateDef(d.id, { overlapGroup: e.target.value || undefined })}
+                    />
+                  </div>
+                  <div className="field-row" style={{ alignItems: 'flex-start' }}>
+                    <label>Notes</label>
+                    <textarea
+                      rows={3}
+                      style={{
+                        flex: 1,
+                        background: 'var(--bg)',
+                        border: '1px solid var(--border)',
+                        color: 'var(--text)',
+                        borderRadius: 5,
+                        padding: '4px 6px',
+                        fontSize: 12.5,
+                        fontFamily: 'inherit',
+                        resize: 'vertical',
+                      }}
+                      value={d.notes ?? ''}
+                      onChange={(e) => updateDef(d.id, { notes: e.target.value || undefined })}
                     />
                   </div>
                   <div className="hint">
@@ -212,6 +276,7 @@ export default function CatalogPanel() {
               <option value="floor">Floor / interior</option>
               <option value="roof">Roof (own layout plane)</option>
               <option value="underbody">Underbody (own layout plane)</option>
+              <option value="door">Rear door (swings open with the door)</option>
             </select>
           </div>
           <div className="field-row">

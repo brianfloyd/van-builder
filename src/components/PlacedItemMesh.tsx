@@ -5,7 +5,7 @@ import { TransformControls } from '@react-three/drei';
 import type { ComponentDef, PlacedInstance } from '../types';
 import { CATEGORY_COLORS } from '../types';
 import { useStore, GRID_SNAP } from '../store';
-import { computeEnvelope, clamp, rotatedDims, snap } from '../geometry';
+import { computeEnvelope, clamp, clampToDoorPanel, rotatedDims, snap, REAR_DOOR_OPEN_ANGLE_DEG } from '../geometry';
 
 interface Props {
   instance: PlacedInstance;
@@ -19,6 +19,7 @@ export default function PlacedItemMesh({ instance, def, selected, violating }: P
   const selectInstance = useStore((s) => s.selectInstance);
   const updateInstance = useStore((s) => s.updateInstance);
   const shell = useStore((s) => s.shell);
+  const doorsOpen = useStore((s) => s.doorsOpen);
 
   const color = violating ? '#e05a4e' : def.color ?? CATEGORY_COLORS[def.category];
   const boxGeo = useMemo(
@@ -26,11 +27,46 @@ export default function PlacedItemMesh({ instance, def, selected, violating }: P
     [def.dims.w, def.dims.h, def.dims.d]
   );
 
+  const isDoor = def.mountSurface === 'door';
+  const doorId = instance.doorId ?? 'rear-left';
+  // Same hinge convention as VanFeaturesMesh's RearDoorPanel: left panel
+  // hinges at x=0 (swings toward +angle... openSign -1), right panel hinges
+  // at x=interiorWidth (openSign +1). Nesting this item's group inside an
+  // identically-transformed outer group is what makes it swing WITH the
+  // door instead of staying fixed in the van's world space.
+  const hingeX = doorId === 'rear-left' ? 0 : shell.interiorWidth;
+  const hingeZ = shell.interiorLength;
+  const openSign = doorId === 'rear-left' ? -1 : 1;
+  const doorOpenAngle = isDoor && doorsOpen.rear ? openSign * ((REAR_DOOR_OPEN_ANGLE_DEG * Math.PI) / 180) : 0;
+  // instance.pos is always expressed in the door-CLOSED world frame (same
+  // convention as every other mount surface); subtracting the hinge gives
+  // the position relative to the hinge, which is what the outer rotated
+  // group needs so it lands in the right place at any door angle.
+  const localX = isDoor ? instance.pos.x - hingeX : instance.pos.x;
+  const localY = instance.pos.y;
+  const localZ = isDoor ? instance.pos.z - hingeZ : instance.pos.z;
+
+  // Dragging a door-mounted item only makes geometric sense while the door
+  // is closed (the gizmo operates in the hinge group's local space, which
+  // only equals world space at angle 0). Position is still freely editable
+  // via the Inspector's X/Y fields regardless of door state.
+  const draggable = selected && !instance.locked && !(isDoor && doorsOpen.rear);
+
   function handleDragEnd() {
     const g = groupRef.current;
     if (!g) return;
-    const env = computeEnvelope(shell);
     const dims = rotatedDims(def.dims, instance.rotationY);
+    if (isDoor) {
+      const clamped = clampToDoorPanel(shell, doorId, dims, {
+        x: g.position.x + hingeX,
+        y: g.position.y,
+        z: g.position.z + hingeZ,
+      });
+      g.position.set(clamped.x - hingeX, clamped.y, clamped.z - hingeZ);
+      updateInstance(instance.id, { pos: clamped });
+      return;
+    }
+    const env = computeEnvelope(shell);
     const x = snap(clamp(g.position.x, env.minX + dims.w / 2, env.maxX - dims.w / 2), GRID_SNAP);
     const y = snap(clamp(g.position.y, env.minY, env.maxY - dims.h), GRID_SNAP);
     const z = snap(clamp(g.position.z, env.minZ + dims.d / 2, env.maxZ - dims.d / 2), GRID_SNAP);
@@ -40,24 +76,26 @@ export default function PlacedItemMesh({ instance, def, selected, violating }: P
 
   return (
     <>
-      <group
-        ref={groupRef}
-        position={[instance.pos.x, instance.pos.y, instance.pos.z]}
-        rotation={[0, (instance.rotationY * Math.PI) / 180, 0]}
-        onClick={(e) => {
-          e.stopPropagation();
-          selectInstance(instance.id);
-        }}
-      >
-        <mesh position={[0, def.dims.h / 2, 0]} geometry={boxGeo}>
-          <meshStandardMaterial color={color} transparent opacity={selected ? 0.85 : 0.65} />
-        </mesh>
-        <lineSegments position={[0, def.dims.h / 2, 0]}>
-          <edgesGeometry args={[boxGeo]} />
-          <lineBasicMaterial color={selected ? '#ffffff' : '#000000'} transparent opacity={selected ? 1 : 0.35} />
-        </lineSegments>
+      <group position={isDoor ? [hingeX, 0, hingeZ] : [0, 0, 0]} rotation={isDoor ? [0, doorOpenAngle, 0] : [0, 0, 0]}>
+        <group
+          ref={groupRef}
+          position={[localX, localY, localZ]}
+          rotation={[0, (instance.rotationY * Math.PI) / 180, 0]}
+          onClick={(e) => {
+            e.stopPropagation();
+            selectInstance(instance.id);
+          }}
+        >
+          <mesh position={[0, def.dims.h / 2, 0]} geometry={boxGeo}>
+            <meshStandardMaterial color={color} transparent opacity={selected ? 0.85 : 0.65} />
+          </mesh>
+          <lineSegments position={[0, def.dims.h / 2, 0]}>
+            <edgesGeometry args={[boxGeo]} />
+            <lineBasicMaterial color={selected ? '#ffffff' : '#000000'} transparent opacity={selected ? 1 : 0.35} />
+          </lineSegments>
+        </group>
       </group>
-      {selected && !instance.locked && (
+      {draggable && (
         <TransformControls
           object={groupRef.current ?? undefined}
           mode="translate"

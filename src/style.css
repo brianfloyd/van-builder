@@ -101,23 +101,40 @@ button:disabled {
 
 .layout {
   display: grid;
-  grid-template-columns: 300px 1fr 300px;
+  grid-template-columns: 300px 5px 1fr 300px;
   min-height: 0;
 }
 
 .panel-col {
   background: var(--panel);
-  border-right: 1px solid var(--border);
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-width: 0;
 }
 
 .panel-col.right {
-  border-right: none;
   border-left: 1px solid var(--border);
+}
+
+.resize-handle {
+  cursor: col-resize;
+  background: var(--border);
+  position: relative;
+}
+
+.resize-handle:hover,
+.resize-handle:active {
+  background: var(--accent);
+}
+
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
 }
 
 .section {
@@ -191,13 +208,13 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 260px;
+  max-height: 320px;
   overflow-y: auto;
 }
 
 .catalog-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 6px 8px;
   border-radius: 6px;
@@ -214,24 +231,54 @@ button:disabled {
   height: 10px;
   border-radius: 3px;
   flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.catalog-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.catalog-item-name-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  row-gap: 2px;
 }
 
 .catalog-item .name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
 }
 
 .catalog-item .dims {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.catalog-item-actions {
+  display: flex;
+  gap: 2px;
   flex-shrink: 0;
+  padding-top: 2px;
 }
 
 .catalog-item.selected {
   border-color: var(--accent);
   background: rgba(74, 145, 158, 0.12);
+}
+
+/* Marks the def whose instance is currently selected in the 3D view, when
+   its edit form isn't open (e.g. the user closed it but selection stands). */
+.catalog-item.picked {
+  border-color: var(--accent);
+  background: rgba(74, 145, 158, 0.06);
 }
 
 .icon-btn {

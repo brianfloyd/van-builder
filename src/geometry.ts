@@ -1,4 +1,11 @@
-import type { ComponentDef, Dims, MountSurface, OverlapMatrix, PlacedInstance, VanShell, Vec3 } from './types';
+import type { ComponentDef, Dims, DoorId, MountSurface, OverlapMatrix, PlacedInstance, VanShell, Vec3 } from './types';
+
+/** Rear door panel thickness (inches) — shared with VanFeaturesMesh so the
+ * 3D door geometry and the door-mount placement math never drift apart. */
+export const REAR_DOOR_THICKNESS = 1.5;
+
+/** Rear door swing-open angle (degrees) — shared with VanFeaturesMesh. */
+export const REAR_DOOR_OPEN_ANGLE_DEG = 100;
 
 export interface Envelope {
   // usable interior box after subtracting insulation/framing/floor/ceiling build-up
@@ -94,9 +101,85 @@ export function envelopeFor(shell: VanShell, mountSurface: MountSurface | undefi
       return computeRoofEnvelope(shell);
     case 'underbody':
       return computeUnderbodyEnvelope(shell);
+    case 'door':
+      // Door envelopes depend on which panel AND the mounted item's own
+      // depth (see computeDoorEnvelope) — there's no single shell-only
+      // answer, so this generic form falls back to the interior envelope.
+      // Every real call site for door-mounted items uses
+      // computeDoorEnvelope directly instead.
+      return computeEnvelope(shell);
     default:
       return computeEnvelope(shell);
   }
+}
+
+export function doorLabel(doorId: DoorId): string {
+  return doorId === 'rear-left' ? 'left rear door' : 'right rear door';
+}
+
+/** World Z (van floor/wall coordinate frame, door CLOSED) of the door
+ * panel's EXTERIOR (outward-facing) face — where a flush-mounted exterior
+ * item's back touches it. Door-mounted gear lives outside the van, same as
+ * roof/underbody gear — it must never occupy interior space. */
+function doorFaceZ(shell: VanShell): number {
+  return shell.interiorLength + REAR_DOOR_THICKNESS / 2;
+}
+
+/** The world-space X span (door CLOSED) of one rear door panel — half of
+ * rearDoorWidth, hinged at the outer corner (x=0 for the left panel,
+ * x=interiorWidth for the right). */
+function doorPanelXSpan(shell: VanShell, doorId: DoorId): { minX: number; maxX: number } {
+  const panelWidth = shell.rearDoorWidth / 2;
+  const minX = doorId === 'rear-left' ? 0 : shell.interiorWidth - panelWidth;
+  return { minX, maxX: minX + panelWidth };
+}
+
+/** The world Z (door CLOSED) an item's footprint CENTER must sit at to be
+ * flush against the door's exterior face, extending further OUTWARD (away
+ * from the van, increasing Z) given its (rotation-adjusted) depth along Z.
+ * This is the one and only valid Z for a door-mounted item — "touching the
+ * exterior" isn't a range, it's this single value, and it never overlaps
+ * the van's interior. */
+export function requiredDoorTouchZ(shell: VanShell, depthD: number): number {
+  return doorFaceZ(shell) + depthD / 2;
+}
+
+/** The valid placement envelope for an item of depth `depthD` mounted on
+ * `doorId`, in the same world coordinates as any other instance (assuming
+ * the door is closed — matches the position convention used everywhere
+ * else). Unlike the roof/underbody envelopes, the Z range here is exactly
+ * `depthD` wide and centered on the one flush-touching position: an item
+ * that exactly fills this box is, by construction, touching the door and
+ * nothing else — sliding it off that Z is what "moved away from the
+ * exterior" means. */
+export function computeDoorEnvelope(shell: VanShell, doorId: DoorId, depthD: number): Envelope {
+  const { minX, maxX } = doorPanelXSpan(shell, doorId);
+  const panelHeight = shell.rearDoorHeight;
+  const z = requiredDoorTouchZ(shell, depthD);
+  return {
+    minX,
+    maxX,
+    minY: 0,
+    maxY: panelHeight,
+    minZ: z - depthD / 2,
+    maxZ: z + depthD / 2,
+    width: Math.max(0, maxX - minX),
+    height: panelHeight,
+    length: depthD,
+  };
+}
+
+/** Corrects a door-mounted item's position to the nearest position that's
+ * (a) within its door panel's width/height and (b) flush against it — i.e.
+ * enforces "can slide anywhere along the exterior, can't move away from
+ * touching it". Used on every placement/move of a door-mount instance so
+ * that constraint is never just a red flag, it's physically unreachable. */
+export function clampToDoorPanel(shell: VanShell, doorId: DoorId, dims: Dims, pos: Vec3): Vec3 {
+  const env = computeDoorEnvelope(shell, doorId, dims.d);
+  const halfW = dims.w / 2;
+  const x = clamp(pos.x, env.minX + halfW, Math.max(env.minX + halfW, env.maxX - halfW));
+  const y = clamp(pos.y, env.minY, Math.max(env.minY, env.maxY - dims.h));
+  return { x, y, z: requiredDoorTouchZ(shell, dims.d) };
 }
 
 function surfaceOf(def: ComponentDef | undefined): MountSurface {
@@ -270,7 +353,9 @@ export function computeClearances(
   matrix: OverlapMatrix
 ): Clearances {
   const surface = surfaceOf(targetDef);
-  const env = envelopeFor(shell, targetDef.mountSurface);
+  const targetDoorId = target.doorId ?? 'rear-left';
+  const dims = rotatedDims(targetDef.dims, target.rotationY);
+  const env = surface === 'door' ? computeDoorEnvelope(shell, targetDoorId, dims.d) : envelopeFor(shell, targetDef.mountSurface);
   const box = instanceAABB(target, targetDef);
 
   const obstacles: AABB[] = [];
@@ -278,10 +363,14 @@ export function computeClearances(
     if (other.id === target.id) continue;
     const oDef = defsById[other.defId];
     if (!oDef || surfaceOf(oDef) !== surface) continue;
+    if (surface === 'door' && (other.doorId ?? 'rear-left') !== targetDoorId) continue;
     if (overlapIsAllowed(target, targetDef, other, oDef, matrix)) continue;
     obstacles.push(instanceAABB(other, oDef));
   }
   if (surface === 'floor') obstacles.push(computeCabZone(shell));
+  // Door-mounted items are flush by construction (env's Z range is exactly
+  // the item's own depth) — forward/back sweeps naturally come out ~0,
+  // correctly reporting "no play toward/away from the door."
 
   return {
     left: sweepClearance(box, obstacles, 'x', -1, env.minX, env.maxX),
@@ -299,12 +388,12 @@ export function findViolations(
   shell: VanShell,
   matrix: OverlapMatrix
 ): Violation[] {
-  const envBySurface: Record<MountSurface, Envelope> = {
+  const envBySurface: Record<'floor' | 'roof' | 'underbody', Envelope> = {
     floor: computeEnvelope(shell),
     roof: computeRoofEnvelope(shell),
     underbody: computeUnderbodyEnvelope(shell),
   };
-  const envelopeLabel: Record<MountSurface, string> = {
+  const envelopeLabel: Record<'floor' | 'roof' | 'underbody', string> = {
     floor: 'buildable',
     roof: 'roof',
     underbody: 'underbody',
@@ -316,8 +405,35 @@ export function findViolations(
     const def = defs[inst.defId];
     if (!def) continue;
     const surface = surfaceOf(def);
-    const env = envBySurface[surface];
     const box = instanceAABB(inst, def);
+
+    if (surface === 'door') {
+      const doorId = inst.doorId ?? 'rear-left';
+      const dims = rotatedDims(def.dims, inst.rotationY);
+      const env = computeDoorEnvelope(shell, doorId, dims.d);
+      const withinPanel =
+        box.minX >= env.minX - 1e-6 &&
+        box.maxX <= env.maxX + 1e-6 &&
+        box.minY >= env.minY - 1e-6 &&
+        box.maxY <= env.maxY + 1e-6;
+      const flush = Math.abs(box.minZ - env.minZ) < 1e-6 && Math.abs(box.maxZ - env.maxZ) < 1e-6;
+      if (!withinPanel) {
+        violations.push({
+          type: 'out-of-bounds',
+          instanceIds: [inst.id],
+          message: `${inst.label ?? def.name} extends outside the ${doorLabel(doorId)} panel`,
+        });
+      } else if (!flush) {
+        violations.push({
+          type: 'out-of-bounds',
+          instanceIds: [inst.id],
+          message: `${inst.label ?? def.name} isn't flush against the ${doorLabel(doorId)} — exterior-mounted items must stay touching the mounting surface`,
+        });
+      }
+      continue;
+    }
+
+    const env = envBySurface[surface];
     if (!aabbWithinEnvelope(box, env)) {
       violations.push({
         type: 'out-of-bounds',
@@ -336,6 +452,8 @@ export function findViolations(
 
   // Only compare items on the same mount surface — a roof solar panel and an
   // interior bed occupy entirely different physical planes and never collide.
+  // Door-mounted items additionally only compare within the same panel — the
+  // left and right rear doors are physically separate surfaces.
   for (let i = 0; i < instances.length; i++) {
     for (let j = i + 1; j < instances.length; j++) {
       const a = instances[i];
@@ -344,6 +462,7 @@ export function findViolations(
       const bDef = defs[b.defId];
       if (!aDef || !bDef) continue;
       if (surfaceOf(aDef) !== surfaceOf(bDef)) continue;
+      if (surfaceOf(aDef) === 'door' && (a.doorId ?? 'rear-left') !== (b.doorId ?? 'rear-left')) continue;
       const boxA = instanceAABB(a, aDef);
       const boxB = instanceAABB(b, bDef);
       if (aabbIntersects(boxA, boxB) && !overlapIsAllowed(a, aDef, b, bDef, matrix)) {
@@ -382,6 +501,68 @@ export function vec3(x: number, y: number, z: number): Vec3 {
  * back to scanning other heights if nothing on the current level works.
  * Returns null if no valid position exists anywhere in the envelope.
  */
+/** Door-mount variant of findNearestValidPosition: Z is never searched (it's
+ * pinned flush by clampToDoorPanel/computeDoorEnvelope) — only X/Y, the two
+ * axes an item can actually slide along on the door's face, and only against
+ * obstacles mounted on that same panel. */
+function findNearestValidDoorPosition(
+  target: PlacedInstance,
+  targetDef: ComponentDef,
+  others: PlacedInstance[],
+  defsById: Record<string, ComponentDef>,
+  shell: VanShell,
+  matrix: OverlapMatrix,
+  stepIn: number
+): Vec3 | null {
+  const doorId = target.doorId ?? 'rear-left';
+  const dims = rotatedDims(targetDef.dims, target.rotationY);
+  const env = computeDoorEnvelope(shell, doorId, dims.d);
+  const halfW = dims.w / 2;
+  const minCx = env.minX + halfW;
+  const maxCx = env.maxX - halfW;
+  const minCy = env.minY;
+  const maxCy = env.maxY - dims.h;
+  if (minCx > maxCx || minCy > maxCy) return null;
+  const z = requiredDoorTouchZ(shell, dims.d);
+
+  const others2 = others.filter(
+    (o) => o.id !== target.id && surfaceOf(defsById[o.defId]) === 'door' && (o.doorId ?? 'rear-left') === doorId
+  );
+
+  function isValid(x: number, y: number): boolean {
+    const box: AABB = { minX: x - halfW, maxX: x + halfW, minY: y, maxY: y + dims.h, minZ: z - dims.d / 2, maxZ: z + dims.d / 2 };
+    for (const other of others2) {
+      const oDef = defsById[other.defId];
+      if (!oDef) continue;
+      const oBox = instanceAABB(other, oDef);
+      if (aabbIntersects(box, oBox) && !overlapIsAllowed(target, targetDef, other, oDef, matrix)) return false;
+    }
+    return true;
+  }
+
+  const startX = clamp(target.pos.x, minCx, maxCx);
+  const startY = clamp(target.pos.y, minCy, maxCy);
+  if (isValid(startX, startY)) return { x: startX, y: startY, z };
+
+  const maxRadius = Math.max(env.width, env.height) + stepIn;
+  for (let r = stepIn; r <= maxRadius; r += stepIn) {
+    const candidates: { x: number; y: number; dist: number }[] = [];
+    for (let dx = -r; dx <= r; dx += stepIn) {
+      for (let dy = -r; dy <= r; dy += stepIn) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < r - stepIn / 2) continue;
+        const x = clamp(startX + dx, minCx, maxCx);
+        const y = clamp(startY + dy, minCy, maxCy);
+        candidates.push({ x, y, dist: Math.hypot(dx, dy) });
+      }
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    for (const c of candidates) {
+      if (isValid(c.x, c.y)) return { x: c.x, y: c.y, z };
+    }
+  }
+  return null;
+}
+
 export function findNearestValidPosition(
   target: PlacedInstance,
   targetDef: ComponentDef,
@@ -392,6 +573,9 @@ export function findNearestValidPosition(
   stepIn = 2
 ): Vec3 | null {
   const surface = surfaceOf(targetDef);
+  if (surface === 'door') {
+    return findNearestValidDoorPosition(target, targetDef, others, defsById, shell, matrix, stepIn);
+  }
   const env = envelopeFor(shell, targetDef.mountSurface);
   const obstacles: AABB[] = surface === 'floor' ? [computeCabZone(shell)] : [];
   const dims = rotatedDims(targetDef.dims, target.rotationY);
