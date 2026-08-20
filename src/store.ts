@@ -1,11 +1,17 @@
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import type { CameraView, ComponentDef, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
 import { DEFAULT_DEFS, DEFAULT_SHELL, buildDefaultOverlapMatrix } from './defaultData';
-import { clamp, envelopeFor, findNearestValidPosition, findViolations, snap, type Violation } from './geometry';
+import { type Violation } from './geometry';
+import * as ops from './projectOps';
 
 const STORAGE_KEY = 'van-builder-project-v1';
-export const GRID_SNAP = 0.5; // inches
+export const GRID_SNAP = ops.GRID_SNAP;
+
+const DEFAULTS: ops.ProjectDefaults = {
+  shell: DEFAULT_SHELL,
+  defs: DEFAULT_DEFS,
+  buildOverlapMatrix: buildDefaultOverlapMatrix,
+};
 
 interface StoreState {
   shell: VanShell;
@@ -53,28 +59,11 @@ interface StoreState {
 function loadInitial(): Pick<StoreState, 'shell' | 'defs' | 'instances' | 'overlapMatrix'> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as ProjectState;
-      if (parsed && parsed.shell && parsed.defs) {
-        return {
-          // Merge onto defaults so a project saved before a shell field was
-          // added (e.g. cab/door dimensions) doesn't load with `undefined`s.
-          shell: { ...DEFAULT_SHELL, ...parsed.shell },
-          defs: parsed.defs,
-          instances: parsed.instances ?? [],
-          overlapMatrix: parsed.overlapMatrix ?? buildDefaultOverlapMatrix(),
-        };
-      }
-    }
+    if (raw) return ops.normalizeProject(JSON.parse(raw), DEFAULTS);
   } catch {
     // ignore corrupt storage
   }
-  return {
-    shell: DEFAULT_SHELL,
-    defs: DEFAULT_DEFS,
-    instances: [],
-    overlapMatrix: buildDefaultOverlapMatrix(),
-  };
+  return ops.normalizeProject(null, DEFAULTS);
 }
 
 function persist(state: Pick<StoreState, 'shell' | 'defs' | 'instances' | 'overlapMatrix'>) {
@@ -92,181 +81,133 @@ function persist(state: Pick<StoreState, 'shell' | 'defs' | 'instances' | 'overl
   }
 }
 
+/** Pulls the project-shaped slice out of full store state, for handing to
+ * projectOps.ts functions (which only know about ProjectState, not the
+ * store's UI-only fields like selectedInstanceId). */
+function toProject(s: Pick<StoreState, 'shell' | 'defs' | 'instances' | 'overlapMatrix'>): ProjectState {
+  return { version: 1, shell: s.shell, defs: s.defs, instances: s.instances, overlapMatrix: s.overlapMatrix };
+}
+
 export const useStore = create<StoreState>((set, get) => ({
   ...loadInitial(),
   selectedInstanceId: null,
 
   doorsOpen: { rear: false, side: false },
-  toggleDoor: (which) =>
-    set((s) => ({ doorsOpen: { ...s.doorsOpen, [which]: !s.doorsOpen[which] } })),
+  toggleDoor: (which) => set((s) => ({ doorsOpen: { ...s.doorsOpen, [which]: !s.doorsOpen[which] } })),
 
   cameraViewRequest: null,
   requestCameraView: (view) => set({ cameraViewRequest: { view, nonce: Date.now() + Math.random() } }),
 
   setShell: (patch) =>
     set((s) => {
-      const shell = { ...s.shell, ...patch };
-      persist({ ...s, shell });
-      return { shell };
+      const next = ops.setShell(toProject(s), patch);
+      persist(next);
+      return next;
     }),
 
   addDef: (def) => {
-    const id = uuid();
+    let newId = '';
     set((s) => {
-      const defs = [...s.defs, { ...def, id }];
-      persist({ ...s, defs });
-      return { defs };
+      const { project, id } = ops.addDef(toProject(s), def);
+      newId = id;
+      persist(project);
+      return project;
     });
-    return id;
+    return newId;
   },
 
   updateDef: (id, patch) =>
     set((s) => {
-      const defs = s.defs.map((d) => (d.id === id ? { ...d, ...patch } : d));
-      persist({ ...s, defs });
-      return { defs };
+      const next = ops.updateDef(toProject(s), id, patch);
+      persist(next);
+      return next;
     }),
 
   removeDef: (id) =>
     set((s) => {
-      const defs = s.defs.filter((d) => d.id !== id);
-      const instances = s.instances.filter((i) => i.defId !== id);
-      persist({ ...s, defs, instances });
-      return { defs, instances };
+      const next = ops.removeDef(toProject(s), id);
+      persist(next);
+      return next;
     }),
 
   addInstance: (defId) => {
-    const id = uuid();
+    let newId = '';
     set((s) => {
-      const def = s.defs.find((d) => d.id === defId);
-      const env = envelopeFor(s.shell, def?.mountSurface);
-      // Place new instance centered-ish in the envelope, nudged so repeated
-      // adds don't stack exactly on top of one another.
-      const count = s.instances.filter((i) => i.defId === defId).length;
-      const w = def?.dims.w ?? 12;
-      const d = def?.dims.d ?? 12;
-      const cx = env.minX + w / 2;
-      const cz = env.minZ + d / 2;
-      // Snapping to the grid can round a corner-hugging position a hair
-      // outside the envelope — clamp again after snapping to guarantee a
-      // freshly-added instance never starts out of bounds.
-      const x = clamp(snap(Math.min(cx + count * 4, Math.max(cx, env.maxX - w / 2)), GRID_SNAP), env.minX + w / 2, env.maxX - w / 2);
-      const z = clamp(snap(Math.min(cz + count * 4, Math.max(cz, env.maxZ - d / 2)), GRID_SNAP), env.minZ + d / 2, env.maxZ - d / 2);
-      const y = clamp(snap(env.minY, GRID_SNAP), env.minY, env.maxY);
-      const instance: PlacedInstance = { id, defId, pos: { x, y, z }, rotationY: 0 };
-      const instances = [...s.instances, instance];
-      persist({ ...s, instances });
-      return { instances, selectedInstanceId: id };
+      const result = ops.addInstance(toProject(s), defId);
+      if ('error' in result) return s;
+      newId = result.instance.id;
+      persist(result.project);
+      return { ...result.project, selectedInstanceId: newId };
     });
-    return id;
+    return newId;
   },
 
   updateInstance: (id, patch) =>
     set((s) => {
-      const instances = s.instances.map((i) => (i.id === id ? { ...i, ...patch } : i));
-      persist({ ...s, instances });
-      return { instances };
+      const next = ops.updateInstance(toProject(s), id, patch);
+      persist(next);
+      return next;
     }),
 
   moveInstance: (id, delta) =>
     set((s) => {
-      const instances = s.instances.map((i) => {
-        if (i.id !== id) return i;
-        return {
-          ...i,
-          pos: {
-            x: snap(i.pos.x + (delta.x ?? 0), GRID_SNAP),
-            y: snap(i.pos.y + (delta.y ?? 0), GRID_SNAP),
-            z: snap(i.pos.z + (delta.z ?? 0), GRID_SNAP),
-          },
-        };
-      });
-      persist({ ...s, instances });
-      return { instances };
+      const next = ops.moveInstanceDelta(toProject(s), id, delta);
+      persist(next);
+      return next;
     }),
 
   removeInstance: (id) =>
     set((s) => {
-      const instances = s.instances.filter((i) => i.id !== id);
-      persist({ ...s, instances });
-      return { instances, selectedInstanceId: s.selectedInstanceId === id ? null : s.selectedInstanceId };
+      const next = ops.removeInstance(toProject(s), id);
+      persist(next);
+      return { ...next, selectedInstanceId: s.selectedInstanceId === id ? null : s.selectedInstanceId };
     }),
 
   selectInstance: (id) => set({ selectedInstanceId: id }),
 
-  duplicateInstance: (id) => {
-    const s = get();
-    const src = s.instances.find((i) => i.id === id);
-    if (!src) return;
-    const newId = uuid();
-    const copy: PlacedInstance = {
-      ...src,
-      id: newId,
-      pos: { x: src.pos.x + 2, y: src.pos.y, z: src.pos.z + 2 },
-    };
-    set((st) => {
-      const instances = [...st.instances, copy];
-      persist({ ...st, instances });
-      return { instances, selectedInstanceId: newId };
-    });
-  },
+  duplicateInstance: (id) =>
+    set((s) => {
+      const result = ops.duplicateInstance(toProject(s), id);
+      if ('error' in result) return s;
+      persist(result.project);
+      return { ...result.project, selectedInstanceId: result.instance.id };
+    }),
 
   resolveInstance: (id) => {
-    const s = get();
-    const target = s.instances.find((i) => i.id === id);
-    const def = s.defs.find((d) => d.id === target?.defId);
-    if (!target || !def) return false;
-    const result = findNearestValidPosition(target, def, s.instances, get().defsById(), s.shell, s.overlapMatrix);
-    if (!result) return false;
-    get().updateInstance(id, { pos: result });
-    return true;
+    let moved = false;
+    set((s) => {
+      const result = ops.resolveInstance(toProject(s), id);
+      moved = result.moved;
+      if (!result.moved) return s;
+      persist(result.project);
+      return result.project;
+    });
+    return moved;
   },
 
   setOverlapAllowed: (catA, catB, allowed) =>
     set((s) => {
-      const overlapMatrix: OverlapMatrix = JSON.parse(JSON.stringify(s.overlapMatrix));
-      (overlapMatrix[catA] ??= {})[catB] = allowed;
-      (overlapMatrix[catB] ??= {})[catA] = allowed;
-      persist({ ...s, overlapMatrix });
-      return { overlapMatrix };
+      const next = ops.setOverlapAllowed(toProject(s), catA, catB, allowed);
+      persist(next);
+      return next;
     }),
 
-  violations: () => {
-    const s = get();
-    const defsById = Object.fromEntries(s.defs.map((d) => [d.id, d]));
-    return findViolations(s.instances, defsById, s.shell, s.overlapMatrix);
-  },
+  violations: () => ops.getViolations(toProject(get())),
 
-  defsById: () => {
-    const s = get();
-    return Object.fromEntries(s.defs.map((d) => [d.id, d]));
-  },
+  defsById: () => ops.defsById(toProject(get())),
 
-  exportProject: () => {
-    const s = get();
-    return { version: 1, shell: s.shell, defs: s.defs, instances: s.instances, overlapMatrix: s.overlapMatrix };
-  },
+  exportProject: () => toProject(get()),
 
   importProject: (data) =>
-    set(() => {
-      const next = {
-        shell: { ...DEFAULT_SHELL, ...data.shell },
-        defs: data.defs,
-        instances: data.instances ?? [],
-        overlapMatrix: data.overlapMatrix ?? buildDefaultOverlapMatrix(),
-      };
+    set((s) => {
+      const next = ops.normalizeProject(data, DEFAULTS);
       persist(next);
       return { ...next, selectedInstanceId: null };
     }),
 
   resetToDefaults: () =>
     set(() => {
-      const next = {
-        shell: DEFAULT_SHELL,
-        defs: DEFAULT_DEFS,
-        instances: [],
-        overlapMatrix: buildDefaultOverlapMatrix(),
-      };
+      const next = ops.normalizeProject(null, DEFAULTS);
       persist(next);
       return { ...next, selectedInstanceId: null };
     }),

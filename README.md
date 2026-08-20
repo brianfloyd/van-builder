@@ -109,6 +109,52 @@ rules) autosaves to `localStorage`. Door open/closed state and the current
 camera-view request are transient UI state, not saved. Use **Export JSON** /
 **Import JSON** in the top bar to save named layouts to disk or share them.
 
+## MCP server — drive it from an external Claude instance
+
+An MCP server lets a Claude instance running elsewhere (not just this app's
+UI) list the catalog, place/move/remove components, check conflicts, and
+speculate on whole layouts. It shares one JSON file (`van-builder-project.json`,
+gitignored — the same `ProjectState` schema as Export/Import JSON) with the
+running dev app:
+
+```
+you edit in the UI  ─┐                          ┌─ MCP tool calls
+                      ├─► van-builder-project.json ◄─┤
+running app hot-reloads ┘   (file-watch + HTTP bridge)  └─ external Claude
+```
+
+- **Start it:** `npm run mcp` runs it standalone over stdio, or it's already
+  registered for Claude Code via `.mcp.json` at the repo root — just restart
+  `claude` in this project and the `van-builder` server is available.
+- **While `npm run dev` is also running**, changes the MCP server makes
+  hot-reload straight into the open browser tab (no refresh), and your own
+  UI edits get written back to the same file — so the two stay in sync in
+  both directions. Without the dev server, the file just updates directly.
+- **Tools:** `list_catalog`, `get_layout` (shell + instances + live
+  conflicts), `place_item` / `place_items` (batch), `move_item`,
+  `remove_item`, `check_conflicts`, `snap_to_safe`, `set_shell_dimensions`,
+  `save_variant` / `load_variant` / `list_variants` (named snapshots, so you
+  can compare candidate layouts instead of overwriting your one working
+  layout each time).
+- **One source of truth for the logic:** every tool calls straight into
+  [src/projectOps.ts](src/projectOps.ts) and [src/geometry.ts](src/geometry.ts)
+  — the exact same placement/collision/resolve functions `store.ts` (the
+  browser app) uses. Nothing about conflict detection or placement is
+  reimplemented for the MCP server; there's one implementation, not two that
+  can drift.
+- **`place_item`'s `plane` argument** is a sanity check, not a placement
+  choice — each catalog component already has a fixed `mountSurface` (see
+  `list_catalog`). Passing a `plane` that doesn't match the component's real
+  surface fails with a clear error instead of silently placing it wrong.
+
+**Phase 2 (not built yet):** a live-sync version (WebSocket push instead of
+this file-watch bridge) would let an external agent and the browser stay in
+sync with zero latency instead of a debounce/file-watch round trip. It isn't
+built, but nothing here blocks it — `src/projectOps.ts` and
+`src/geometry.ts` are already framework/runtime-agnostic (no browser or Node
+imports), so that future server would import them directly too. See the
+comment at the top of [src/projectOps.ts](src/projectOps.ts).
+
 ## Project structure
 
 ```
@@ -116,8 +162,11 @@ src/
   types.ts          domain model (VanShell, ComponentDef, PlacedInstance, MountSurface, ...)
   geometry.ts        envelope math (floor/roof/underbody), AABB collision, rotation,
                      snapping, nearest-safe-spot resolver
+  projectOps.ts      framework-agnostic project mutations (add/move/remove/resolve/...) —
+                     shared by store.ts AND the MCP server, so they can't drift
   defaultData.ts     starter van shell + component catalog + overlap matrix
-  store.ts           zustand store: single source of truth + localStorage persistence
+  store.ts           zustand store: thin wrapper over projectOps.ts + localStorage persistence
+  devSync.ts         dev-only two-way sync between the store and the MCP bridge file
   components/
     Scene.tsx              R3F canvas, camera, lighting, CameraRig (quick-view snapping)
     VanShellMesh.tsx        shell wireframe + envelope wireframe + floor grid
@@ -133,6 +182,17 @@ src/
     CatalogPanel.tsx        add/edit/delete component types, incl. mount surface
     InspectorPanel.tsx      selected item's position/rotation/lock + snap-to-safe + placed list
     ViolationsPanel.tsx
+
+mcp-server/
+  index.ts           MCP server entrypoint — registers all tools over stdio
+  projectFile.ts      Node-side read/write of the bridge file + save/load/list variants
+
+bridge-paths.ts        Node-only file paths (bridge file, variants dir) — repo root, NOT src/,
+                       since src/ is bundled for the browser and must never import fs/path
+bridge-protocol.ts     isomorphic HTTP path + HMR event name constants, shared by the browser
+                       (devSync.ts) and Node side (vite-project-bridge.ts, mcp-server/)
+vite-project-bridge.ts dev-only Vite plugin: GET/POST /api/project + file-watch → HMR push
+.mcp.json              registers the MCP server for Claude Code in this project
 ```
 
 ## Where to go next
@@ -142,6 +202,8 @@ Ideas worth adding as this grows:
   envelope is a clean box).
 - Weight/CG tracking per component for axle-load estimates.
 - A top-down 2D floor-plan view alongside the 3D one.
-- Multiple saved layouts/variants side by side.
+- A UI for browsing/loading MCP-saved variants (save/load/list already work
+  via MCP; there's no in-app picker for them yet).
 - Real engine/drivetrain geometry for the undercarriage plane, if it ever
   matters beyond the current cabDepth approximation.
+- MCP Phase 2: WebSocket live-sync server (see the MCP section above).
