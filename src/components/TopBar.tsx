@@ -1,0 +1,76 @@
+import { useRef } from 'react';
+import { useStore } from '../store';
+import type { ProjectState } from '../types';
+
+export default function TopBar() {
+  const shellName = useStore((s) => s.shell.name);
+  const exportProject = useStore((s) => s.exportProject);
+  const importProject = useStore((s) => s.importProject);
+  const resetToDefaults = useStore((s) => s.resetToDefaults);
+  const violations = useStore((s) => s.violations());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleExport() {
+    const data = exportProject();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = (shellName || 'van').replace(/[^a-z0-9-_]+/gi, '_');
+    a.download = `${safeName}-layout.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportClick() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result as string) as ProjectState;
+        importProject(data);
+      } catch {
+        alert('Could not read that file — is it a Van Builder project JSON export?');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  return (
+    <div className="topbar">
+      <h1>🚐 Van Builder</h1>
+      <span className="hint" style={{ marginBottom: 0 }}>
+        {shellName}
+      </span>
+      <div className="spacer" />
+      <span className={`violations-badge ${violations.length === 0 ? 'ok' : ''}`}>
+        {violations.length === 0 ? 'No conflicts' : `${violations.length} conflict${violations.length === 1 ? '' : 's'}`}
+      </span>
+      <button onClick={handleExport}>Export JSON</button>
+      <button onClick={handleImportClick}>Import JSON</button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/json"
+        style={{ display: 'none' }}
+        onChange={handleFileChange}
+      />
+      <button
+        className="danger"
+        onClick={() => {
+          if (confirm('Reset the entire project to the default van shell and starter catalog? This clears your layout.')) {
+            resetToDefaults();
+          }
+        }}
+      >
+        Reset
+      </button>
+    </div>
+  );
+}
