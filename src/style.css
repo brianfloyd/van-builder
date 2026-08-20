@@ -320,6 +320,41 @@ button:disabled {
   padding: 8px 0;
 }
 
+.clearance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-areas:
+    'left fwd right'
+    'left back right'
+    'up up down';
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.clearance-cell {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.clearance-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+}
+
+.clearance-value {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .camera-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

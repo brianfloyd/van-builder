@@ -190,6 +190,109 @@ export interface Violation {
   message: string;
 }
 
+// ---------------------------------------------------------------------------
+// Clearances — "how far until the next collision" in each of the 6 axis
+// directions, for the selected item. Reuses the exact same AABB/overlap
+// logic as findViolations, just as a swept-distance query instead of a
+// yes/no intersection test.
+// ---------------------------------------------------------------------------
+
+export interface Clearances {
+  left: number; // -X, inches
+  right: number; // +X
+  up: number; // +Y
+  down: number; // -Y
+  forward: number; // -Z, toward the front/cab wall
+  back: number; // +Z, toward the rear doors
+}
+
+type Axis = 'x' | 'y' | 'z';
+
+function axisBounds(box: AABB, axis: Axis): [number, number] {
+  if (axis === 'x') return [box.minX, box.maxX];
+  if (axis === 'y') return [box.minY, box.maxY];
+  return [box.minZ, box.maxZ];
+}
+
+function otherAxes(axis: Axis): [Axis, Axis] {
+  return axis === 'x' ? ['y', 'z'] : axis === 'y' ? ['x', 'z'] : ['x', 'y'];
+}
+
+function rangesOverlap(aMin: number, aMax: number, bMin: number, bMax: number, epsilon = 1e-6): boolean {
+  return aMin < bMax - epsilon && aMax > bMin + epsilon;
+}
+
+/** Max distance `box` could slide along `axis` in `sign` direction before
+ * touching an obstacle in `obstacles` or its plane's envelope wall.
+ * Obstacles are only relevant if they're actually in the box's path on the
+ * other two axes — a component off to the side doesn't limit how far
+ * something can rise straight up, for instance. */
+function sweepClearance(
+  box: AABB,
+  obstacles: AABB[],
+  axis: Axis,
+  sign: 1 | -1,
+  envMin: number,
+  envMax: number,
+  epsilon = 1e-6
+): number {
+  const [boxMin, boxMax] = axisBounds(box, axis);
+  let limit = sign === 1 ? envMax - boxMax : boxMin - envMin;
+  const [oA, oB] = otherAxes(axis);
+  const [boxAMin, boxAMax] = axisBounds(box, oA);
+  const [boxBMin, boxBMax] = axisBounds(box, oB);
+
+  for (const obs of obstacles) {
+    const [obsAMin, obsAMax] = axisBounds(obs, oA);
+    if (!rangesOverlap(boxAMin, boxAMax, obsAMin, obsAMax, epsilon)) continue;
+    const [obsBMin, obsBMax] = axisBounds(obs, oB);
+    if (!rangesOverlap(boxBMin, boxBMax, obsBMin, obsBMax, epsilon)) continue;
+
+    const [obsMin, obsMax] = axisBounds(obs, axis);
+    if (sign === 1) {
+      if (obsMin >= boxMax - epsilon) limit = Math.min(limit, obsMin - boxMax);
+    } else {
+      if (obsMax <= boxMin + epsilon) limit = Math.min(limit, boxMin - obsMax);
+    }
+  }
+  return Math.max(0, limit);
+}
+
+/** Clearance to the nearest same-plane obstacle (or envelope wall) in each
+ * of the 6 directions — e.g. how far a bed mounted near the ceiling could
+ * drop before its underside reaches the floor (or whatever's below it). */
+export function computeClearances(
+  target: PlacedInstance,
+  targetDef: ComponentDef,
+  others: PlacedInstance[],
+  defsById: Record<string, ComponentDef>,
+  shell: VanShell,
+  matrix: OverlapMatrix
+): Clearances {
+  const surface = surfaceOf(targetDef);
+  const env = envelopeFor(shell, targetDef.mountSurface);
+  const box = instanceAABB(target, targetDef);
+
+  const obstacles: AABB[] = [];
+  for (const other of others) {
+    if (other.id === target.id) continue;
+    const oDef = defsById[other.defId];
+    if (!oDef || surfaceOf(oDef) !== surface) continue;
+    if (overlapIsAllowed(target, targetDef, other, oDef, matrix)) continue;
+    obstacles.push(instanceAABB(other, oDef));
+  }
+  if (surface === 'floor') obstacles.push(computeCabZone(shell));
+
+  return {
+    left: sweepClearance(box, obstacles, 'x', -1, env.minX, env.maxX),
+    right: sweepClearance(box, obstacles, 'x', 1, env.minX, env.maxX),
+    up: sweepClearance(box, obstacles, 'y', 1, env.minY, env.maxY),
+    down: sweepClearance(box, obstacles, 'y', -1, env.minY, env.maxY),
+    forward: sweepClearance(box, obstacles, 'z', -1, env.minZ, env.maxZ),
+    back: sweepClearance(box, obstacles, 'z', 1, env.minZ, env.maxZ),
+  };
+}
+
 export function findViolations(
   instances: PlacedInstance[],
   defs: Record<string, ComponentDef>,

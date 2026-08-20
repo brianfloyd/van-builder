@@ -12,7 +12,16 @@
 
 import { v4 as uuid } from 'uuid';
 import type { ComponentDef, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
-import { clamp, envelopeFor, findNearestValidPosition, findViolations, snap, type Violation } from './geometry';
+import {
+  clamp,
+  computeClearances,
+  envelopeFor,
+  findNearestValidPosition,
+  findViolations,
+  snap,
+  type Clearances,
+  type Violation,
+} from './geometry';
 
 export const GRID_SNAP = 0.5; // inches — shared placement/nudge grid
 
@@ -59,6 +68,16 @@ export function defsById(project: ProjectState): Record<string, ComponentDef> {
 /** Reuses geometry.ts's findViolations directly — never reimplemented. */
 export function getViolations(project: ProjectState): Violation[] {
   return findViolations(project.instances, defsById(project), project.shell, project.overlapMatrix);
+}
+
+/** Distance from a placed instance to its nearest same-plane obstacle (or
+ * envelope wall) in each of the 6 directions. Reuses geometry.ts's
+ * computeClearances directly. Returns null if the instance doesn't exist. */
+export function getClearances(project: ProjectState, instanceId: string): Clearances | null {
+  const target = project.instances.find((i) => i.id === instanceId);
+  const def = project.defs.find((d) => d.id === target?.defId);
+  if (!target || !def) return null;
+  return computeClearances(target, def, project.instances, defsById(project), project.shell, project.overlapMatrix);
 }
 
 export function setShell(project: ProjectState, patch: Partial<VanShell>): ProjectState {

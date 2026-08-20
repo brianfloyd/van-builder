@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { CameraView, ComponentDef, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
 import { DEFAULT_DEFS, DEFAULT_SHELL, buildDefaultOverlapMatrix } from './defaultData';
-import { type Violation } from './geometry';
+import { type Clearances, type Violation } from './geometry';
 import * as ops from './projectOps';
 
 const STORAGE_KEY = 'van-builder-project-v1';
@@ -24,6 +24,12 @@ interface StoreState {
    * state — not persisted with the project. */
   doorsOpen: { rear: boolean; side: boolean };
   toggleDoor: (which: 'rear' | 'side') => void;
+
+  /** Whether the selected item's 6-direction clearance gauges draw in the
+   * 3D view. Off by default — six lines + labels per item gets busy fast.
+   * Transient UI state, not persisted. */
+  showClearances: boolean;
+  toggleClearances: () => void;
 
   /** One-shot camera-snap request consumed by the Scene. Always a fresh
    * object so requesting the same view twice in a row still fires. */
@@ -49,6 +55,7 @@ interface StoreState {
   setOverlapAllowed: (catA: string, catB: string, allowed: boolean) => void;
 
   violations: () => Violation[];
+  clearances: (id: string) => Clearances | null;
   defsById: () => Record<string, ComponentDef>;
 
   exportProject: () => ProjectState;
@@ -94,6 +101,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   doorsOpen: { rear: false, side: false },
   toggleDoor: (which) => set((s) => ({ doorsOpen: { ...s.doorsOpen, [which]: !s.doorsOpen[which] } })),
+
+  showClearances: false,
+  toggleClearances: () => set((s) => ({ showClearances: !s.showClearances })),
 
   cameraViewRequest: null,
   requestCameraView: (view) => set({ cameraViewRequest: { view, nonce: Date.now() + Math.random() } }),
@@ -193,6 +203,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }),
 
   violations: () => ops.getViolations(toProject(get())),
+  clearances: (id) => ops.getClearances(toProject(get()), id),
 
   defsById: () => ops.defsById(toProject(get())),
 

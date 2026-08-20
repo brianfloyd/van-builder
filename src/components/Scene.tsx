@@ -16,6 +16,7 @@ import VanFeaturesMesh from './VanFeaturesMesh';
 import RoofPlaneMesh from './RoofPlaneMesh';
 import UnderbodyPlaneMesh from './UnderbodyPlaneMesh';
 import PlacedItemMesh from './PlacedItemMesh';
+import ClearanceGauges from './ClearanceGauges';
 
 /** Applies one-shot camera-snap requests (top/front/back/left/right/roof/...)
  * from the store. Lives inside the Canvas so it can use useThree(). */
@@ -167,6 +168,8 @@ export default function Scene() {
           />
         );
       })}
+
+      <ClearanceGauges />
 
       <CameraRig floorEnv={floorEnv} roofEnv={roofEnv} underbodyEnv={underbodyEnv} controlsRef={controlsRef} />
       <OrbitControls ref={controlsRef} makeDefault target={target} minDistance={20} maxDistance={800} />

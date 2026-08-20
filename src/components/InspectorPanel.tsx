@@ -12,6 +12,9 @@ export default function InspectorPanel() {
   const duplicateInstance = useStore((s) => s.duplicateInstance);
   const resolveInstance = useStore((s) => s.resolveInstance);
   const violations = useStore((s) => s.violations());
+  const clearances = useStore((s) => (selectedId ? s.clearances(selectedId) : null));
+  const showClearances = useStore((s) => s.showClearances);
+  const toggleClearances = useStore((s) => s.toggleClearances);
 
   const selected = instances.find((i) => i.id === selectedId) ?? null;
   const def = selected ? defsById[selected.defId] : null;
@@ -132,7 +135,43 @@ export default function InspectorPanel() {
               📍 Snap to nearest safe spot
             </button>
 
-            <div className="field-row">
+            <div className="hint" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>Clearance to nearest obstacle (in)</span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={showClearances} onChange={toggleClearances} />
+                show in 3D
+              </label>
+            </div>
+            {clearances && (
+              <div className="clearance-grid">
+                <div className="clearance-cell" style={{ gridArea: 'fwd' }}>
+                  <span className="clearance-label">Fwd</span>
+                  <span className="clearance-value">{clearances.forward.toFixed(1)}"</span>
+                </div>
+                <div className="clearance-cell" style={{ gridArea: 'left' }}>
+                  <span className="clearance-label">Left</span>
+                  <span className="clearance-value">{clearances.left.toFixed(1)}"</span>
+                </div>
+                <div className="clearance-cell" style={{ gridArea: 'right' }}>
+                  <span className="clearance-label">Right</span>
+                  <span className="clearance-value">{clearances.right.toFixed(1)}"</span>
+                </div>
+                <div className="clearance-cell" style={{ gridArea: 'back' }}>
+                  <span className="clearance-label">Back</span>
+                  <span className="clearance-value">{clearances.back.toFixed(1)}"</span>
+                </div>
+                <div className="clearance-cell" style={{ gridArea: 'up' }}>
+                  <span className="clearance-label">Up</span>
+                  <span className="clearance-value">{clearances.up.toFixed(1)}"</span>
+                </div>
+                <div className="clearance-cell" style={{ gridArea: 'down' }}>
+                  <span className="clearance-label">Down</span>
+                  <span className="clearance-value">{clearances.down.toFixed(1)}"</span>
+                </div>
+              </div>
+            )}
+
+            <div className="field-row" style={{ marginTop: 10 }}>
               <label>Rotation</label>
               <div className="button-row">
                 <button
