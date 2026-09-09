@@ -74,7 +74,19 @@ export const CATEGORY_COLORS: Record<Category, string> = {
  * roof/underbody which are static planes. Each is planned as its own layer,
  * combined on top of / below / hinged-to the van in the same scene, with its
  * own independent collision checking. */
-export type MountSurface = 'floor' | 'roof' | 'underbody' | 'door';
+export type MountSurface = 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling';
+
+/** 'ceiling' components live INSIDE the van (same physical space as 'floor'
+ * items — they collide with beds, cabinets, the cab zone, etc.) but hang
+ * from above instead of standing on the floor: their TOP face is always
+ * pressed against the finished ceiling, or against the underside of
+ * whatever interior item is directly above them (e.g. a raised HappiJac
+ * bed platform). They can be dragged anywhere in X/Z; Y is derived, never
+ * free — "hug the ceiling" is enforced on every placement/move the same way
+ * "flush against the door" is for 'door' items. Because Y is recomputed
+ * whenever anything moves, lowering the bed above a ceiling item lowers
+ * the item with it. */
+export const INTERIOR_SURFACES: readonly MountSurface[] = ['floor', 'ceiling'];
 
 /** Which rear swing-door panel a 'door'-mount instance is attached to. The
  * rear doors are two independent hinged panels (left half / right half of
@@ -85,6 +97,39 @@ export interface Dims {
   w: number; // across x (width) at rotation 0
   d: number; // along z (depth/length) at rotation 0
   h: number; // up y (height)
+}
+
+/** What kind of plumbing/electrical connection a port marker represents —
+ * drives its marker color and default label in the 3D view. */
+export type PortKind = 'fill' | 'vent' | 'outlet' | 'inlet' | 'drain' | 'electrical' | 'other';
+
+// Distinct from CATEGORY_COLORS and kept clear of the violation-red hue (see
+// note above) so a port marker never reads as either a category swatch or a
+// conflict indicator.
+export const PORT_COLORS: Record<PortKind, string> = {
+  fill: '#ffd166',
+  vent: '#95d5b2',
+  outlet: '#00b4d8',
+  drain: '#00b4d8',
+  inlet: '#7b6d8d',
+  electrical: '#f4e04d',
+  other: '#adb5bd',
+};
+
+/** A labeled plumbing/electrical connection point on a component — visual
+ * reference only (rendered as a small marker in the 3D view + listed in the
+ * Inspector), never collision-checked. Position is in the component's own
+ * local frame at rotation 0, same convention as `dims`: x/z are centered
+ * on the footprint (-w/2..w/2, -d/2..d/2), y is height from the component's
+ * base (0..h). */
+export interface ComponentPort {
+  kind: PortKind;
+  /** Optional override label, e.g. "1-1/2\" BSPT fill/vent". Falls back to
+   * the kind name if omitted. */
+  label?: string;
+  x: number;
+  y: number;
+  z: number;
 }
 
 export interface ComponentDef {
@@ -113,6 +158,24 @@ export interface ComponentDef {
    * 'final' for the hand-authored starter catalog; defs created through
    * the checklist importer default to 'placeholder' unless marked final. */
   status?: 'final' | 'placeholder';
+  /** True when this component's actual shape is hollowed/notched to fit
+   * around the rear wheel well by design (e.g. a wheel-well water tank) —
+   * its bounding box is allowed to overlap the wheel-well exclusion zone
+   * (computeWheelWellZones) without being flagged as a conflict or treated
+   * as an obstacle for snap-to-safe. The box model can't represent the real
+   * cutout shape, so this is the escape hatch: it doesn't shrink the
+   * footprint, it just stops that one specific overlap from reading as an
+   * error. Everything else (other instances, cab zone, envelope walls)
+   * still collides normally. */
+  wheelWellCutout?: boolean;
+  /** Labeled plumbing/electrical connection points (fill, vent, drain,
+   * etc), for visual reference only. */
+  ports?: ComponentPort[];
+  /** Product / spec-sheet link for this part (Amazon listing, manufacturer
+   * page, install manual, etc). Shown as a clickable link in the catalog
+   * sheet view. Free-form links buried in `notes` are also harvested there
+   * as a fallback, but this is the canonical one. */
+  url?: string;
 }
 
 export interface Vec3 {
@@ -183,6 +246,26 @@ export interface VanShell {
    * (water tanks, etc). The zone also automatically stays clear of the front
    * ~cabDepth of the van, approximating the engine/transmission area. */
   underbodyClearance: number;
+
+  // --- Rear wheel wells (both sides) — a floor-plane build exclusion, same
+  // treatment as the cab zone: NOT subtracted from interiorWidth above, just
+  // an always-out-of-bounds region layered on top. Modeled as a flat-topped
+  // rectangular box (how it's actually built out in plywood, not the true
+  // curved arch) intruding inward from each side wall. Set wheelWellWidth or
+  // wheelWellHeight to 0 to disable (e.g. for a non-ProMaster shell where this
+  // doesn't apply). Defaults approximate a Ram ProMaster 159" EXT High Roof
+  // from community-measured van-conversion sources, not a manufacturer spec —
+  // true these up with your own tape measure before cutting anything. Front
+  // wheel wells aren't modeled — they fall inside the cab zone, which is
+  // already off-limits, so there's nothing extra to build around there.
+  /** How far each wheel well box intrudes inward from its side wall. */
+  wheelWellWidth: number;
+  /** How tall each wheel well box is off the floor. */
+  wheelWellHeight: number;
+  /** Front-to-back extent of each wheel well box. */
+  wheelWellLength: number;
+  /** Distance from the front wall (z=0) to the rear wheel wells' center. */
+  rearWheelWellCenterZ: number;
 }
 
 export type CameraView =

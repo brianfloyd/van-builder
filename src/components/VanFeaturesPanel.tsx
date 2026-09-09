@@ -106,6 +106,28 @@ export default function VanFeaturesPanel() {
             <label>Underbody clearance (in)</label>
             <input type="number" value={shell.underbodyClearance} onChange={num('underbodyClearance')} />
           </div>
+
+          <div className="hint">
+            Rear wheel wells (both sides) — a floor build exclusion, same as the cab zone. Front wheel wells aren't
+            modeled; they fall inside the cab zone, which is already off-limits. Defaults approximate a Ram
+            ProMaster 159" EXT — true these up with a tape measure. Set width or height to 0 to disable.
+          </div>
+          <div className="field-row">
+            <label>Intrusion from side wall (in)</label>
+            <input type="number" value={shell.wheelWellWidth} onChange={num('wheelWellWidth')} />
+          </div>
+          <div className="field-row">
+            <label>Height off floor (in)</label>
+            <input type="number" value={shell.wheelWellHeight} onChange={num('wheelWellHeight')} />
+          </div>
+          <div className="field-row">
+            <label>Length, front-to-back (in)</label>
+            <input type="number" value={shell.wheelWellLength} onChange={num('wheelWellLength')} />
+          </div>
+          <div className="field-row">
+            <label>Rear wheel well center, from front wall (in)</label>
+            <input type="number" value={shell.rearWheelWellCenterZ} onChange={num('rearWheelWellCenterZ')} />
+          </div>
         </>
       )}
     </div>

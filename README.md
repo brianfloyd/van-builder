@@ -45,6 +45,20 @@ against the *rear* edge of that reserved zone (bordering the living area),
 leaving the front open for the windshield/dash/steering wheel, which aren't
 modeled. Configurable in the **Cab, Doors & Layers** panel.
 
+**Wheel wells — another hard exclusion zone.** Two flat-topped boxes (rear,
+left + right) intrude from the side walls into the floor plane — same
+treatment as the cab zone: an always-off-limits region layered on top of
+the envelope, not subtracted from `interiorWidth`. Front wheel wells aren't
+modeled; they fall inside the cab zone, which is already off-limits, so
+there's nothing extra to build around there. All four dimensions (intrusion
+from the wall, height, front-to-back length, and the pair's position along
+the van) are configurable in **Cab, Doors & Layers**; set width or height to
+0 to disable them entirely. The shipped defaults approximate a Ram
+ProMaster 159" EXT High Roof from community-measured van-conversion sources
+(Ram doesn't publish interior wheel-well dimensions) — true them up with
+your own tape measure before cutting anything. See `computeWheelWellZones`
+in [src/geometry.ts](src/geometry.ts).
+
 **Rear doors & side slider.** Reference geometry only — doesn't constrain
 the envelope. Rear doors are hinged swing panels; the side door is a
 sliding-door marker (dimensions/position configurable, since they vary van
@@ -99,7 +113,8 @@ explicitly allowed:
    one-off exceptions, settable via import/export JSON today.
 
 Anything outside its plane's envelope is flagged too, and anything on the
-floor plane overlapping the cab zone is flagged as an obstacle conflict.
+floor plane overlapping the cab zone or a wheel well is flagged as an
+obstacle conflict.
 All three show up live in the **Conflicts** panel and highlight red in the
 3D view; click a conflict (or its "Fix" button) to jump to / resolve the
 offending item.
@@ -198,8 +213,8 @@ vite-project-bridge.ts dev-only Vite plugin: GET/POST /api/project + file-watch 
 ## Where to go next
 
 Ideas worth adding as this grows:
-- Wheel-well cutouts and other shell obstructions (currently the floor
-  envelope is a clean box).
+- Other shell obstructions beyond the wheel wells (currently the only
+  modeled floor obstruction besides the cab zone).
 - Weight/CG tracking per component for axle-load estimates.
 - A top-down 2D floor-plan view alongside the 3D one.
 - A UI for browsing/loading MCP-saved variants (save/load/list already work

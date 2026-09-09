@@ -1,12 +1,37 @@
 import { useMemo } from 'react';
 import * as THREE from 'three';
 import type { VanShell } from '../types';
-import { computeCabZone, REAR_DOOR_THICKNESS, REAR_DOOR_OPEN_ANGLE_DEG } from '../geometry';
+import { computeCabZone, computeWheelWellZones, REAR_DOOR_THICKNESS, REAR_DOOR_OPEN_ANGLE_DEG } from '../geometry';
 
 const CAB_COLOR = '#ffb703';
 const SEAT_COLOR = '#3a3a3a';
 const DOOR_COLOR = '#8d99ae';
 const SIDE_DOOR_COLOR = '#4a919e';
+// Not amber (CAB_COLOR) or violation-red (see types.ts's hue-reservation
+// note) — a neutral slate so an empty wheel well zone never reads as an
+// active conflict at rest.
+const WHEEL_WELL_COLOR = '#6c757d';
+
+/** One wheel well cutout — a flat-topped exclusion box, same visual
+ * treatment as the cab zone (translucent fill + wireframe edges) so it
+ * reads as "don't build here" rather than a real solid object. */
+function WheelWellBox({ box, label }: { box: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }; label: string }) {
+  const w = box.maxX - box.minX;
+  const h = box.maxY - box.minY;
+  const d = box.maxZ - box.minZ;
+  const geo = useMemo(() => new THREE.BoxGeometry(w, h, d), [w, h, d]);
+  return (
+    <group position={[box.minX + w / 2, box.minY + h / 2, box.minZ + d / 2]} name={label}>
+      <mesh geometry={geo}>
+        <meshBasicMaterial color={WHEEL_WELL_COLOR} transparent opacity={0.1} depthWrite={false} />
+      </mesh>
+      <lineSegments>
+        <edgesGeometry args={[geo]} />
+        <lineBasicMaterial color={WHEEL_WELL_COLOR} transparent opacity={0.5} />
+      </lineSegments>
+    </group>
+  );
+}
 
 /** One approximate captain's chair, swiveled to face the rear of the van (a
  * common camper-conversion move) — backrest toward the front, cushion
@@ -107,6 +132,7 @@ export default function VanFeaturesMesh({
   const cabD = cab.maxZ - cab.minZ;
 
   const cabGeo = useMemo(() => new THREE.BoxGeometry(cabW, cabH, cabD), [cabW, cabH, cabD]);
+  const wheelWellZones = computeWheelWellZones(shell);
 
   const sideDoorX = shell.sideDoorSide === 'left' ? -0.75 : shell.interiorWidth + 0.75;
   const sideDoorGeo = useMemo(
@@ -147,6 +173,11 @@ export default function VanFeaturesMesh({
         depth={shell.cabSeatDepth}
         height={shell.cabSeatHeight}
       />
+
+      {/* Wheel well cutouts */}
+      {wheelWellZones.map((zone) => (
+        <WheelWellBox key={zone.label} box={zone.box} label={zone.label} />
+      ))}
 
       {/* Rear swing doors */}
       <RearDoorPanel

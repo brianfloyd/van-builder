@@ -91,6 +91,9 @@ server.tool(
         estCost: d.estCost,
         status: d.status ?? 'final',
         notes: d.notes,
+        url: d.url,
+        wheelWellCutout: d.wheelWellCutout,
+        ports: d.ports,
         placedCount: project.instances.filter((i) => i.defId === d.id).length,
       })),
     });
@@ -104,7 +107,7 @@ server.tool(
     'the app itself uses. Coordinate frame: x = across width (0 = left wall), y = up (0 = van ' +
     'floor; negative = below floor on the underbody plane), z = along length (0 = front/cab wall). ' +
     'Units are inches. A placed item\'s x/z is its footprint CENTER (stable under rotation); y is ' +
-    'its BASE height on whichever plane it mounts to (floor/roof/underbody).',
+    'its BASE height on whichever plane it mounts to (floor/roof/underbody); for "ceiling" items y is derived (top pressed against the ceiling or the item above), not chosen.',
   {},
   async (): Promise<CallToolResult> => {
     const project = readProject();
@@ -122,8 +125,27 @@ const categorySchema = z.enum([
   'storage', 'cabinet', 'appliance', 'electrical', 'water', 'plumbing', 'lighting', 'roof', 'other',
 ]);
 const statusSchema = z.enum(['final', 'placeholder']);
-const mountSurfaceSchema = z.enum(['floor', 'roof', 'underbody', 'door']);
+const mountSurfaceSchema = z.enum(['floor', 'roof', 'underbody', 'door', 'ceiling']);
 const doorIdSchema = z.enum(['rear-left', 'rear-right']);
+const portKindSchema = z.enum(['fill', 'vent', 'outlet', 'inlet', 'drain', 'electrical', 'other']);
+const portsSchema = z
+  .array(
+    z.object({
+      kind: portKindSchema,
+      label: z.string().optional().describe('Optional override label, e.g. \'1-1/2" BSPT fill/vent\'. Falls back to the kind name if omitted.'),
+      x: z.number(),
+      y: z.number(),
+      z: z.number(),
+    })
+  )
+  .optional()
+  .describe(
+    'Labeled plumbing/electrical connection points (fill, vent, drain, etc) — rendered as small ' +
+      'colored markers in the 3D view and listed in the Inspector, purely for reference; never ' +
+      'collision-checked. Position is in the component\'s own local frame at rotation 0, same ' +
+      'convention as dims: x/z are centered on the footprint (-w/2..w/2, -d/2..d/2), y is height ' +
+      'from the component\'s base (0..h).'
+  );
 
 function describeDef(project: ProjectState, def: ComponentDef) {
   return {
@@ -136,6 +158,9 @@ function describeDef(project: ProjectState, def: ComponentDef) {
     estCost: def.estCost,
     status: def.status ?? 'final',
     notes: def.notes,
+    url: def.url,
+    wheelWellCutout: def.wheelWellCutout,
+    ports: def.ports,
     placedCount: project.instances.filter((i) => i.defId === def.id).length,
   };
 }
@@ -153,15 +178,26 @@ server.tool(
     dims: z.object({ w: z.number().positive(), d: z.number().positive(), h: z.number().positive() })
       .describe('Footprint at rotation 0, inches: w = across width, d = along length, h = up.'),
     mountSurface: mountSurfaceSchema.optional().describe(
-      'Defaults to "floor" if omitted. "door" mounts to a rear door panel — it swings open with the ' +
+      'Defaults to "floor" if omitted. "ceiling" hangs INSIDE the van from above: it can be placed anywhere in x/z but its y is derived so its top always hugs the finished ceiling, or the underside of whatever floor-plane item is directly above it (e.g. a raised lift bed) — and it follows that item if it moves. It collides with interior items like any floor item. "door" mounts to a rear door panel — it swings open with the ' +
         'door in the 3D view and is auto-clamped flush against it (see place_item\'s doorId param).'
     ),
     estCost: z.number().min(0).optional().describe('Estimated unit cost in USD. Omit if not priced yet.'),
     status: statusSchema.optional().default('placeholder')
       .describe('"final" once name/dims/cost are locked in; defaults to "placeholder".'),
     notes: z.string().optional(),
+    url: z.string().optional().describe(
+      'Product / spec-sheet link (Amazon listing, manufacturer page, install manual). Put the canonical ' +
+        'buy/spec link here rather than burying it in notes — the catalog sheet view shows it as a link.'
+    ),
     overlapGroup: z.string().optional()
       .describe('Instances of defs sharing this group are treated as alternates and may overlap each other (e.g. two sink options on one footprint).'),
+    wheelWellCutout: z.boolean().optional().describe(
+      'Set true when this component\'s real shape is hollowed/notched to fit around the rear wheel ' +
+        'well by design (e.g. a wheel-well water tank) — its bounding box is then allowed to overlap ' +
+        'the wheel-well exclusion zone without being flagged as a conflict. Everything else (other ' +
+        'instances, the cab zone, envelope walls) still collides normally.'
+    ),
+    ports: portsSchema,
   },
   async (args): Promise<CallToolResult> => {
     const project = readProject();
@@ -173,7 +209,10 @@ server.tool(
       estCost: args.estCost,
       status: args.status,
       notes: args.notes,
+      url: args.url,
       overlapGroup: args.overlapGroup,
+      wheelWellCutout: args.wheelWellCutout,
+      ports: args.ports,
     });
     writeProject(next);
     const def = next.defs.find((d) => d.id === id)!;
@@ -196,14 +235,23 @@ server.tool(
     estCost: z.number().min(0).optional(),
     status: statusSchema.optional(),
     notes: z.string().optional(),
+    url: z.string().optional().describe('Product / spec-sheet link. Pass an empty string to clear it.'),
     overlapGroup: z.string().optional(),
+    wheelWellCutout: z.boolean().optional().describe(
+      'Set true when this component\'s real shape is hollowed/notched to fit around the rear wheel ' +
+        'well by design — its bounding box is then allowed to overlap the wheel-well exclusion zone ' +
+        'without being flagged as a conflict.'
+    ),
+    ports: portsSchema,
   },
   async ({ id, ...patch }): Promise<CallToolResult> => {
     const project = readProject();
     if (!project.defs.some((d) => d.id === id)) {
       return fail(`No component def with id "${id}". Call list_catalog for valid ids.`);
     }
-    const next = ops.updateDef(project, id, patch);
+    const cleanPatch: Partial<ComponentDef> = { ...patch };
+    if (patch.url !== undefined) cleanPatch.url = patch.url.trim() || undefined;
+    const next = ops.updateDef(project, id, cleanPatch);
     writeProject(next);
     const def = next.defs.find((d) => d.id === id)!;
     return ok({ def: describeDef(next, def), violations: ops.getViolations(next) });
@@ -213,7 +261,7 @@ server.tool(
 const placeItemShape = {
   componentId: z.string().describe('A def id from list_catalog.'),
   plane: z
-    .enum(['floor', 'roof', 'underbody', 'door'])
+    .enum(['floor', 'roof', 'underbody', 'door', 'ceiling'])
     .optional()
     .describe(
       'Optional sanity check, not a placement choice — each component already has a fixed mount ' +
@@ -221,7 +269,7 @@ const placeItemShape = {
         'call fails with an error instead of silently placing it on the wrong plane.'
     ),
   x: z.number().describe('Footprint center, inches from the left wall (x=0).'),
-  y: z.number().describe('Base height, inches. 0 = that plane\'s floor (van floor for "floor", roof surface for "roof", van floor underside for "underbody", height on the door panel for "door"), where negative values go further down.'),
+  y: z.number().describe('Base height, inches. 0 = that plane\'s floor (van floor for "floor", roof surface for "roof", van floor underside for "underbody", height on the door panel for "door"), where negative values go further down. IGNORED for "ceiling" components — y is auto-derived so the top hugs the ceiling / the item above.'),
   z: z.number().describe('Footprint center, inches from the front/cab wall (z=0). For "door" components this is IGNORED — it\'s auto-computed so the item sits flush against the door; pass x/y as if the door were closed.'),
   doorId: doorIdSchema.optional().describe('Which rear door panel to mount on — only used when the component\'s mountSurface is "door" (defaults to "rear-left" if omitted). Ignored otherwise. An item can\'t straddle both panels.'),
   rotation: rotationSchema.optional().default(0).describe('Yaw in degrees, one of 0/90/180/270.'),
@@ -400,8 +448,9 @@ server.tool(
 server.tool(
   'set_shell_dimensions',
   'Patch the van shell — interior length/width/height, wall framing + insulation thickness, ' +
-    'ceiling framing, floor build-up, cab depth/seat size, rear/side door dimensions, and roof/' +
-    'underbody clearance. All fields optional; only what you pass changes. All values in inches.',
+    'ceiling framing, floor build-up, cab depth/seat size, rear/side door dimensions, roof/' +
+    'underbody clearance, and wheel-well cutout size/position (a floor build-exclusion zone, same ' +
+    'treatment as the cab zone). All fields optional; only what you pass changes. All values in inches.',
   {
     name: z.string().optional(),
     interiorLength: z.number().positive().optional(),
@@ -423,6 +472,10 @@ server.tool(
     sideDoorSide: z.enum(['left', 'right']).optional(),
     roofClearance: z.number().min(0).optional(),
     underbodyClearance: z.number().min(0).optional(),
+    wheelWellWidth: z.number().min(0).optional().describe('Intrusion inward from each side wall. 0 disables the rear wheel-well exclusion zones.'),
+    wheelWellHeight: z.number().min(0).optional().describe('Height off the floor. 0 disables the rear wheel-well exclusion zones.'),
+    wheelWellLength: z.number().min(0).optional().describe('Front-to-back extent of each rear wheel well box.'),
+    rearWheelWellCenterZ: z.number().optional().describe('Distance from the front wall (z=0) to the rear wheel wells\' center. Front wheel wells aren\'t modeled — they fall inside the already-off-limits cab zone.'),
   },
   async (patch): Promise<CallToolResult> => {
     const project = readProject();
@@ -487,6 +540,7 @@ interface ChecklistRow {
   cost: number | null;
   status: string | null;
   notes: string;
+  url: string;
 }
 
 const HEADER_ALIASES: Record<string, keyof ChecklistRow | 'skip'> = {
@@ -500,6 +554,7 @@ const HEADER_ALIASES: Record<string, keyof ChecklistRow | 'skip'> = {
   cost: 'cost', price: 'cost', estcost: 'cost',
   status: 'status',
   notes: 'notes', note: 'notes',
+  url: 'url', link: 'url', urls: 'url',
 };
 
 function splitTableRow(line: string): string[] {
@@ -568,6 +623,7 @@ function parseChecklist(markdown: string): { rows: ChecklistRow[]; warnings: str
       cost: parseNum(get('cost')),
       status: get('status').toLowerCase() || null,
       notes: get('notes'),
+      url: get('url'),
     });
   }
   return { rows, warnings };
@@ -606,8 +662,8 @@ server.tool(
         warnings.push(`"${row.item}": unrecognized category "${row.category}" — filed under "other".`);
       }
       const mountSurface =
-        row.mountSurface && ['floor', 'roof', 'underbody', 'door'].includes(row.mountSurface)
-          ? (row.mountSurface as 'floor' | 'roof' | 'underbody' | 'door')
+        row.mountSurface && ['floor', 'roof', 'underbody', 'door', 'ceiling'].includes(row.mountSurface)
+          ? (row.mountSurface as 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling')
           : undefined;
 
       let def = project.defs.find((d) => d.name.toLowerCase() === row.item.toLowerCase());
@@ -625,6 +681,7 @@ server.tool(
         if (row.cost != null) patch.estCost = row.cost;
         if (rowStatus) patch.status = rowStatus;
         if (row.notes) patch.notes = row.notes;
+        if (row.url) patch.url = row.url;
         if (mountSurface) patch.mountSurface = mountSurface;
         if (Object.keys(patch).length > 0) {
           project = ops.updateDef(project, def.id, patch);
@@ -640,6 +697,7 @@ server.tool(
           estCost: row.cost ?? undefined,
           status: rowStatus ?? (dimsGiven && row.cost != null ? 'final' : 'placeholder'),
           notes: row.notes || undefined,
+          url: row.url || undefined,
         });
         project = created.project;
         def = project.defs.find((d) => d.id === created.id)!;
@@ -694,14 +752,14 @@ server.tool(
   {},
   async (): Promise<CallToolResult> => {
     const project = readProject();
-    const header = '| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | Notes |';
-    const sep = '|---|---|---|---|---|---|---|---|---|---|';
+    const header = '| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | URL | Notes |';
+    const sep = '|---|---|---|---|---|---|---|---|---|---|---|';
     const lines = [header, sep];
     for (const d of [...project.defs].sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))) {
       const qty = project.instances.filter((i) => i.defId === d.id).length;
       const cost = d.estCost != null ? String(d.estCost) : 'TBD';
       lines.push(
-        `| ${d.category} | ${d.name} | ${qty} | ${d.dims.w} | ${d.dims.d} | ${d.dims.h} | ${d.mountSurface ?? 'floor'} | ${cost} | ${d.status ?? 'final'} | ${d.notes ?? ''} |`
+        `| ${d.category} | ${d.name} | ${qty} | ${d.dims.w} | ${d.dims.d} | ${d.dims.h} | ${d.mountSurface ?? 'floor'} | ${cost} | ${d.status ?? 'final'} | ${d.url ?? ''} | ${d.notes ?? ''} |`
       );
     }
     return ok({ markdown: lines.join('\n'), defCount: project.defs.length, totalInstances: project.instances.length });

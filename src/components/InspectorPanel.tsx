@@ -1,5 +1,56 @@
+import { useCallback, useRef } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useStore, GRID_SNAP } from '../store';
-import { CATEGORY_COLORS } from '../types';
+import { CATEGORY_COLORS, PORT_COLORS } from '../types';
+
+const HOLD_DELAY_MS = 400;
+const HOLD_REPEAT_MS = 120;
+
+/** Press-and-hold-to-repeat for the D-pad/Up/Down buttons: fires `onStep`
+ * once immediately on press, then keeps firing on an interval while held,
+ * so a long press walks the item across the room instead of needing one
+ * click per 0.5" step. Falls back to a plain onClick for keyboard
+ * activation (Enter/Space don't emit pointer events), guarded so a real
+ * pointer click doesn't double-fire. */
+function useHoldRepeat(onStep: () => void) {
+  const timeoutRef = useRef<number | null>(null);
+  const intervalRef = useRef<number | null>(null);
+  const firedByPointerRef = useRef(false);
+
+  const clear = useCallback(() => {
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    if (intervalRef.current !== null) {
+      window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  }, []);
+
+  const onPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>) => {
+      if (e.button !== 0) return; // primary button/touch only
+      firedByPointerRef.current = true;
+      onStep();
+      clear();
+      timeoutRef.current = window.setTimeout(() => {
+        intervalRef.current = window.setInterval(onStep, HOLD_REPEAT_MS);
+      }, HOLD_DELAY_MS);
+    },
+    [onStep, clear]
+  );
+
+  const onClick = useCallback(() => {
+    if (firedByPointerRef.current) {
+      firedByPointerRef.current = false;
+      return;
+    }
+    onStep();
+  }, [onStep]);
+
+  return { onPointerDown, onPointerUp: clear, onPointerLeave: clear, onPointerCancel: clear, onClick };
+}
 
 export default function InspectorPanel() {
   const instances = useStore((s) => s.instances);
@@ -21,6 +72,15 @@ export default function InspectorPanel() {
   const def = selected ? defsById[selected.defId] : null;
   const selectedViolations = selected ? violations.filter((v) => v.instanceIds.includes(selected.id)) : [];
   const isDoorMount = def?.mountSurface === 'door';
+  const isCeilingMount = def?.mountSurface === 'ceiling';
+
+  // Called unconditionally (Rules of Hooks) — each no-ops if nothing's selected.
+  const fwdHold = useHoldRepeat(() => selected && moveInstance(selected.id, { z: -GRID_SNAP }));
+  const backHold = useHoldRepeat(() => selected && moveInstance(selected.id, { z: GRID_SNAP }));
+  const leftHold = useHoldRepeat(() => selected && moveInstance(selected.id, { x: -GRID_SNAP }));
+  const rightHold = useHoldRepeat(() => selected && moveInstance(selected.id, { x: GRID_SNAP }));
+  const upHold = useHoldRepeat(() => selected && moveInstance(selected.id, { y: GRID_SNAP }));
+  const downHold = useHoldRepeat(() => selected && moveInstance(selected.id, { y: -GRID_SNAP }));
 
   function handleResolve() {
     if (!selected) return;
@@ -66,7 +126,9 @@ export default function InspectorPanel() {
             <div className="hint">
               {isDoorMount
                 ? 'Position (in) — X: side-to-side on the door, Y: height on the door. Z is locked flush against the door — it can\'t be moved away from touching it.'
-                : 'Position (in) — X: width, Y: height off floor, Z: length'}
+                : isCeilingMount
+                  ? 'Position (in) — X: width, Z: length. Y is derived: the top always hugs the ceiling, or the underside of whatever interior item is directly above it (e.g. the bed) — and follows it if that moves.'
+                  : 'Position (in) — X: width, Y: height off floor, Z: length'}
             </div>
             <div className="field-row">
               <label>X</label>
@@ -100,6 +162,20 @@ export default function InspectorPanel() {
                 }
               />
             </div>
+            {def.ports && def.ports.length > 0 && (
+              <>
+                <div className="hint">Ports (marked in the 3D view)</div>
+                <div className="instance-list" style={{ marginBottom: 8 }}>
+                  {def.ports.map((port, i) => (
+                    <div key={i} className="catalog-item" style={{ cursor: 'default' }}>
+                      <span className="swatch" style={{ background: PORT_COLORS[port.kind] }} />
+                      <span className="name">{port.label ?? port.kind}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
             {isDoorMount && doorsOpen.rear && (
               <div className="hint" style={{ color: '#ffd166' }}>
                 ⚠ Rear doors are open — drag-to-move in the 3D view is disabled while open (the X/Y fields above
@@ -110,40 +186,24 @@ export default function InspectorPanel() {
             <div className="hint">Move (± {GRID_SNAP}") — floor plane, and height</div>
             <div className="dpad-row">
               <div className="dpad">
-                <button
-                  className="dpad-btn dpad-fwd"
-                  title="Forward"
-                  onClick={() => moveInstance(selected.id, { z: -GRID_SNAP })}
-                >
+                <button className="dpad-btn dpad-fwd" title="Forward (hold to keep moving)" {...fwdHold}>
                   ▲
                 </button>
-                <button
-                  className="dpad-btn dpad-left"
-                  title="Left"
-                  onClick={() => moveInstance(selected.id, { x: -GRID_SNAP })}
-                >
+                <button className="dpad-btn dpad-left" title="Left (hold to keep moving)" {...leftHold}>
                   ◀
                 </button>
-                <button
-                  className="dpad-btn dpad-right"
-                  title="Right"
-                  onClick={() => moveInstance(selected.id, { x: GRID_SNAP })}
-                >
+                <button className="dpad-btn dpad-right" title="Right (hold to keep moving)" {...rightHold}>
                   ▶
                 </button>
-                <button
-                  className="dpad-btn dpad-back"
-                  title="Back"
-                  onClick={() => moveInstance(selected.id, { z: GRID_SNAP })}
-                >
+                <button className="dpad-btn dpad-back" title="Back (hold to keep moving)" {...backHold}>
                   ▼
                 </button>
               </div>
               <div className="vpad">
-                <button title="Up" onClick={() => moveInstance(selected.id, { y: GRID_SNAP })}>
+                <button title="Up (hold to keep moving)" {...upHold}>
                   ⤒ Up
                 </button>
-                <button title="Down" onClick={() => moveInstance(selected.id, { y: -GRID_SNAP })}>
+                <button title="Down (hold to keep moving)" {...downHold}>
                   ⤓ Down
                 </button>
               </div>

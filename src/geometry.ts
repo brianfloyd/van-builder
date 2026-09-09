@@ -101,6 +101,10 @@ export function envelopeFor(shell: VanShell, mountSurface: MountSurface | undefi
       return computeRoofEnvelope(shell);
     case 'underbody':
       return computeUnderbodyEnvelope(shell);
+    case 'ceiling':
+      // Ceiling items live inside the van — same envelope as floor items;
+      // only their Y is special (see ceilingHangY / clampToCeiling).
+      return computeEnvelope(shell);
     case 'door':
       // Door envelopes depend on which panel AND the mounted item's own
       // depth (see computeDoorEnvelope) — there's no single shell-only
@@ -186,6 +190,83 @@ function surfaceOf(def: ComponentDef | undefined): MountSurface {
   return def?.mountSurface ?? 'floor';
 }
 
+/** Which physical space a surface's items occupy for collision purposes.
+ * 'floor' and 'ceiling' items share the van interior and DO collide with
+ * each other (a ceiling-hung monitor vs. a tall cabinet); roof, underbody
+ * and door items are each their own separate plane. */
+export type PhysicalPlane = 'interior' | 'roof' | 'underbody' | 'door';
+export function physicalPlane(surface: MountSurface): PhysicalPlane {
+  return surface === 'floor' || surface === 'ceiling' ? 'interior' : surface;
+}
+function samePlane(a: ComponentDef | undefined, b: ComponentDef | undefined): boolean {
+  return physicalPlane(surfaceOf(a)) === physicalPlane(surfaceOf(b));
+}
+
+/** The world Y a ceiling-mounted item's TOP must touch when its footprint
+ * is centered at (x, z): the finished ceiling, or — if any interior
+ * (floor-plane) item overlaps that footprint in X/Z from above — the
+ * underside of the LOWEST such item it can still fit beneath. This is what
+ * makes a rail bolted under a raised bed platform hang from the bed rather
+ * than the ceiling, and follow the bed down when it's lowered. Items the
+ * target is allowed to overlap (same overlapGroup / whitelisted) are
+ * ignored — the trolley+arm assembly rides ON its rail, it doesn't hang
+ * under it. */
+export function ceilingHangY(
+  shell: VanShell,
+  dims: Dims,
+  x: number,
+  z: number,
+  target: Pick<PlacedInstance, 'id' | 'overlapWhitelist'>,
+  targetDef: ComponentDef,
+  others: PlacedInstance[],
+  defsById: Record<string, ComponentDef>
+): number {
+  const env = computeEnvelope(shell);
+  let hang = env.maxY;
+  const halfW = dims.w / 2;
+  const halfD = dims.d / 2;
+  for (const other of others) {
+    if (other.id === target.id) continue;
+    const oDef = defsById[other.defId];
+    if (!oDef || surfaceOf(oDef) !== 'floor') continue;
+    if (target.overlapWhitelist?.includes(other.id) || other.overlapWhitelist?.includes(target.id)) continue;
+    if (targetDef.overlapGroup && targetDef.overlapGroup === oDef.overlapGroup) continue;
+    const oBox = instanceAABB(other, oDef);
+    const overlapsXZ =
+      x - halfW < oBox.maxX - 1e-6 && x + halfW > oBox.minX + 1e-6 && z - halfD < oBox.maxZ - 1e-6 && z + halfD > oBox.minZ + 1e-6;
+    if (!overlapsXZ) continue;
+    // Only hang from things we can actually fit under; something sitting on
+    // the floor (a cabinet) isn't a "ceiling" — that's a plain collision.
+    if (oBox.minY - dims.h < env.minY - 1e-6) continue;
+    hang = Math.min(hang, oBox.minY);
+  }
+  return hang;
+}
+
+/** Corrects a ceiling-mounted item's position: X/Z clamped into the
+ * interior envelope, Y forced to (hang height − item height) so its top is
+ * pressed against the ceiling or the underside of what's above it. Used on
+ * every placement/move so "floating below the ceiling" is unreachable, not
+ * just flagged. */
+export function clampToCeiling(
+  shell: VanShell,
+  dims: Dims,
+  pos: Vec3,
+  target: Pick<PlacedInstance, 'id' | 'overlapWhitelist'>,
+  targetDef: ComponentDef,
+  others: PlacedInstance[],
+  defsById: Record<string, ComponentDef>
+): Vec3 {
+  const env = computeEnvelope(shell);
+  const halfW = dims.w / 2;
+  const halfD = dims.d / 2;
+  const x = clamp(pos.x, env.minX + halfW, Math.max(env.minX + halfW, env.maxX - halfW));
+  const z = clamp(pos.z, env.minZ + halfD, Math.max(env.minZ + halfD, env.maxZ - halfD));
+  const hang = ceilingHangY(shell, dims, x, z, target, targetDef, others, defsById);
+  const y = Math.max(env.minY, hang - dims.h);
+  return { x, y, z };
+}
+
 /** Fixed cab/front-seat exclusion zone, in the same absolute shell coordinates
  * as component placement. Deliberately NOT folded into computeEnvelope — it's
  * a hard build-exclusion region layered on top, not a dimension constraint. */
@@ -198,6 +279,42 @@ export function computeCabZone(shell: VanShell): AABB {
     minZ: 0,
     maxZ: Math.max(0, shell.cabDepth),
   };
+}
+
+export interface WheelWellZone {
+  /** e.g. "front-left wheel well" — used in violation messages. */
+  label: string;
+  box: AABB;
+}
+
+/** Wheel well cutouts, in the same absolute shell coordinates as component
+ * placement — same treatment as computeCabZone: a hard floor-plane
+ * exclusion layered on top, not folded into computeEnvelope. Returns one
+ * flat-topped box per rear side (left/right); returns [] if
+ * width/height/length is 0 (i.e. disabled). Front wheel wells aren't
+ * modeled — they fall inside the cab zone, which is already off-limits, so
+ * there's nothing to build around there. */
+export function computeWheelWellZones(shell: VanShell): WheelWellZone[] {
+  const { wheelWellWidth: w, wheelWellHeight: h, wheelWellLength: len } = shell;
+  if (w <= 0 || h <= 0 || len <= 0) return [];
+
+  const centerZ = shell.rearWheelWellCenterZ;
+  const sides = [
+    { label: 'left', minX: 0, maxX: w },
+    { label: 'right', minX: Math.max(0, shell.interiorWidth - w), maxX: shell.interiorWidth },
+  ];
+
+  return sides.map((side) => ({
+    label: `rear-${side.label} wheel well`,
+    box: {
+      minX: side.minX,
+      maxX: side.maxX,
+      minY: 0,
+      maxY: h,
+      minZ: centerZ - len / 2,
+      maxZ: centerZ + len / 2,
+    },
+  }));
 }
 
 /** Footprint dims after applying a 90-degree-snapped yaw rotation. */
@@ -362,12 +479,17 @@ export function computeClearances(
   for (const other of others) {
     if (other.id === target.id) continue;
     const oDef = defsById[other.defId];
-    if (!oDef || surfaceOf(oDef) !== surface) continue;
+    if (!oDef || !samePlane(oDef, targetDef)) continue;
     if (surface === 'door' && (other.doorId ?? 'rear-left') !== targetDoorId) continue;
     if (overlapIsAllowed(target, targetDef, other, oDef, matrix)) continue;
     obstacles.push(instanceAABB(other, oDef));
   }
-  if (surface === 'floor') obstacles.push(computeCabZone(shell));
+  if (physicalPlane(surface) === 'interior') {
+    obstacles.push(computeCabZone(shell));
+    if (!targetDef.wheelWellCutout) {
+      for (const zone of computeWheelWellZones(shell)) obstacles.push(zone.box);
+    }
+  }
   // Door-mounted items are flush by construction (env's Z range is exactly
   // the item's own depth) — forward/back sweeps naturally come out ~0,
   // correctly reporting "no play toward/away from the door."
@@ -388,17 +510,20 @@ export function findViolations(
   shell: VanShell,
   matrix: OverlapMatrix
 ): Violation[] {
-  const envBySurface: Record<'floor' | 'roof' | 'underbody', Envelope> = {
+  const envBySurface: Record<'floor' | 'roof' | 'underbody' | 'ceiling', Envelope> = {
     floor: computeEnvelope(shell),
+    ceiling: computeEnvelope(shell),
     roof: computeRoofEnvelope(shell),
     underbody: computeUnderbodyEnvelope(shell),
   };
-  const envelopeLabel: Record<'floor' | 'roof' | 'underbody', string> = {
+  const envelopeLabel: Record<'floor' | 'roof' | 'underbody' | 'ceiling', string> = {
     floor: 'buildable',
+    ceiling: 'buildable',
     roof: 'roof',
     underbody: 'underbody',
   };
   const cabZone = computeCabZone(shell);
+  const wheelWellZones = computeWheelWellZones(shell);
   const violations: Violation[] = [];
 
   for (const inst of instances) {
@@ -441,12 +566,34 @@ export function findViolations(
         message: `${inst.label ?? def.name} extends outside the ${envelopeLabel[surface]} envelope`,
       });
     }
-    if (surface === 'floor' && aabbIntersects(box, cabZone)) {
+    if (surface === 'ceiling') {
+      const dims = rotatedDims(def.dims, inst.rotationY);
+      const hang = ceilingHangY(shell, dims, inst.pos.x, inst.pos.z, inst, def, instances, defs);
+      if (Math.abs(box.maxY - hang) > 1e-3) {
+        violations.push({
+          type: 'out-of-bounds',
+          instanceIds: [inst.id],
+          message: `${inst.label ?? def.name} isn't hugging the ceiling (or the underside of what's above it) — ceiling-mounted items must stay pressed against it`,
+        });
+      }
+    }
+    if (physicalPlane(surface) === 'interior' && aabbIntersects(box, cabZone)) {
       violations.push({
         type: 'obstacle',
         instanceIds: [inst.id],
         message: `${inst.label ?? def.name} overlaps the cab / front seat area`,
       });
+    }
+    if (surface === 'floor' && !def.wheelWellCutout) {
+      for (const zone of wheelWellZones) {
+        if (aabbIntersects(box, zone.box)) {
+          violations.push({
+            type: 'obstacle',
+            instanceIds: [inst.id],
+            message: `${inst.label ?? def.name} overlaps the ${zone.label}`,
+          });
+        }
+      }
     }
   }
 
@@ -461,7 +608,7 @@ export function findViolations(
       const aDef = defs[a.defId];
       const bDef = defs[b.defId];
       if (!aDef || !bDef) continue;
-      if (surfaceOf(aDef) !== surfaceOf(bDef)) continue;
+      if (!samePlane(aDef, bDef)) continue;
       if (surfaceOf(aDef) === 'door' && (a.doorId ?? 'rear-left') !== (b.doorId ?? 'rear-left')) continue;
       const boxA = instanceAABB(a, aDef);
       const boxB = instanceAABB(b, bDef);
@@ -577,7 +724,14 @@ export function findNearestValidPosition(
     return findNearestValidDoorPosition(target, targetDef, others, defsById, shell, matrix, stepIn);
   }
   const env = envelopeFor(shell, targetDef.mountSurface);
-  const obstacles: AABB[] = surface === 'floor' ? [computeCabZone(shell)] : [];
+  const isCeiling = surface === 'ceiling';
+  const obstacles: AABB[] =
+    physicalPlane(surface) === 'interior'
+      ? [
+          computeCabZone(shell),
+          ...(targetDef.wheelWellCutout ? [] : computeWheelWellZones(shell).map((z) => z.box)),
+        ]
+      : [];
   const dims = rotatedDims(targetDef.dims, target.rotationY);
   const halfW = dims.w / 2;
   const halfD = dims.d / 2;
@@ -590,9 +744,15 @@ export function findNearestValidPosition(
   const maxY = env.maxY - dims.h;
   if (minCx > maxCx || minCz > maxCz || minY > maxY) return null; // doesn't fit at all
 
-  const others2 = others.filter((o) => o.id !== target.id && surfaceOf(defsById[o.defId]) === surface);
+  const others2 = others.filter((o) => o.id !== target.id && samePlane(defsById[o.defId], targetDef));
 
-  function isValid(x: number, y: number, z: number): boolean {
+  // Ceiling items have no free Y — it's whatever the hang rule says at
+  // this X/Z, so every candidate re-derives it instead of sweeping heights.
+  const hangYAt = (x: number, z: number) =>
+    Math.max(env.minY, ceilingHangY(shell, dims, x, z, target, targetDef, others, defsById) - dims.h);
+
+  function isValid(x: number, yIn: number, z: number): boolean {
+    const y = isCeiling ? hangYAt(x, z) : yIn;
     const box: AABB = { minX: x - halfW, maxX: x + halfW, minY: y, maxY: y + dims.h, minZ: z - halfD, maxZ: z + halfD };
     if (!aabbWithinEnvelope(box, env)) return false;
     for (const obs of obstacles) if (aabbIntersects(box, obs)) return false;
@@ -609,7 +769,8 @@ export function findNearestValidPosition(
   const startZ = clamp(target.pos.z, minCz, maxCz);
   const startY = clamp(target.pos.y, minY, maxY);
 
-  if (isValid(startX, startY, startZ)) return { x: startX, y: startY, z: startZ };
+  const yFor = (x: number, z: number) => (isCeiling ? hangYAt(x, z) : startY);
+  if (isValid(startX, startY, startZ)) return { x: startX, y: yFor(startX, startZ), z: startZ };
 
   const maxRadius = Math.max(env.width, env.length) + stepIn;
   for (let r = stepIn; r <= maxRadius; r += stepIn) {
@@ -625,9 +786,10 @@ export function findNearestValidPosition(
     }
     candidates.sort((a, b) => a.dist - b.dist);
     for (const c of candidates) {
-      if (isValid(c.x, startY, c.z)) return { x: c.x, y: startY, z: c.z };
+      if (isValid(c.x, startY, c.z)) return { x: c.x, y: yFor(c.x, c.z), z: c.z };
     }
   }
+  if (isCeiling) return null; // no other heights to try — Y isn't ours to choose
 
   // Last resort: sweep other floor heights too (rare — very cluttered van).
   const yStep = Math.max(stepIn, Math.min(dims.h, 6));

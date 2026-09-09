@@ -7,6 +7,9 @@ export default function TopBar() {
   const exportProject = useStore((s) => s.exportProject);
   const importProject = useStore((s) => s.importProject);
   const resetToDefaults = useStore((s) => s.resetToDefaults);
+  const showLabels = useStore((s) => s.showLabels);
+  const toggleLabels = useStore((s) => s.toggleLabels);
+  const openSheet = useStore((s) => s.setCatalogSheetOpen);
   const violations = useStore((s) => s.violations());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -52,6 +55,13 @@ export default function TopBar() {
       <span className={`violations-badge ${violations.length === 0 ? 'ok' : ''}`}>
         {violations.length === 0 ? 'No conflicts' : `${violations.length} conflict${violations.length === 1 ? '' : 's'}`}
       </span>
+      <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 0 }}>
+        <input type="checkbox" checked={showLabels} onChange={toggleLabels} />
+        Labels
+      </label>
+      <button onClick={() => openSheet(true)} title="Catalog as a spreadsheet — pricing, dims, links, notes">
+        ⊞ Catalog sheet
+      </button>
       <button onClick={handleExport}>Export JSON</button>
       <button onClick={handleImportClick}>Import JSON</button>
       <input

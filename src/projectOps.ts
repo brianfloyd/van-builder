@@ -14,6 +14,7 @@ import { v4 as uuid } from 'uuid';
 import type { ComponentDef, DoorId, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
 import {
   clamp,
+  clampToCeiling,
   clampToDoorPanel,
   computeClearances,
   computeDoorEnvelope,
@@ -35,11 +36,41 @@ import {
  * mount surface. */
 function reclampDoorInstance(project: ProjectState, inst: PlacedInstance): PlacedInstance {
   const def = project.defs.find((d) => d.id === inst.defId);
-  if (!def || (def.mountSurface ?? 'floor') !== 'door') return inst;
+  if (!def) return inst;
+  const surface = def.mountSurface ?? 'floor';
+  if (surface === 'ceiling') {
+    const dims = rotatedDims(def.dims, inst.rotationY);
+    const pos = clampToCeiling(project.shell, dims, inst.pos, inst, def, project.instances, defsById(project));
+    return { ...inst, pos };
+  }
+  if (surface !== 'door') return inst;
   const doorId: DoorId = inst.doorId ?? 'rear-left';
   const dims = rotatedDims(def.dims, inst.rotationY);
   const pos = clampToDoorPanel(project.shell, doorId, dims, inst.pos);
   return { ...inst, doorId, pos };
+}
+
+/** Ceiling-hung items derive their Y from whatever is above them, so ANY
+ * change to the layout (a bed platform lowered, a cabinet removed, a def's
+ * dims/mountSurface edited, the shell's ceiling build-up changed) can
+ * change where they must sit. Every mutation below runs its result through
+ * this so ceiling items are always re-hung — that's what makes a rail
+ * bolted under a lift bed follow the bed down. Cheap: a no-op pass when
+ * nothing is ceiling-mounted. */
+function rehangCeilingInstances(project: ProjectState): ProjectState {
+  const byId = defsById(project);
+  if (!project.instances.some((i) => (byId[i.defId]?.mountSurface ?? 'floor') === 'ceiling')) return project;
+  let changed = false;
+  const instances = project.instances.map((inst) => {
+    const def = byId[inst.defId];
+    if (!def || (def.mountSurface ?? 'floor') !== 'ceiling') return inst;
+    const dims = rotatedDims(def.dims, inst.rotationY);
+    const pos = clampToCeiling(project.shell, dims, inst.pos, inst, def, project.instances, byId);
+    if (pos.x === inst.pos.x && pos.y === inst.pos.y && pos.z === inst.pos.z) return inst;
+    changed = true;
+    return { ...inst, pos };
+  });
+  return changed ? { ...project, instances } : project;
 }
 
 export const GRID_SNAP = 0.5; // inches — shared placement/nudge grid
@@ -100,7 +131,7 @@ export function getClearances(project: ProjectState, instanceId: string): Cleara
 }
 
 export function setShell(project: ProjectState, patch: Partial<VanShell>): ProjectState {
-  return { ...project, shell: { ...project.shell, ...patch } };
+  return rehangCeilingInstances({ ...project, shell: { ...project.shell, ...patch } });
 }
 
 export function addDef(project: ProjectState, def: Omit<ComponentDef, 'id'>): { project: ProjectState; id: string } {
@@ -109,15 +140,15 @@ export function addDef(project: ProjectState, def: Omit<ComponentDef, 'id'>): { 
 }
 
 export function updateDef(project: ProjectState, id: string, patch: Partial<ComponentDef>): ProjectState {
-  return { ...project, defs: project.defs.map((d) => (d.id === id ? { ...d, ...patch } : d)) };
+  return rehangCeilingInstances({ ...project, defs: project.defs.map((d) => (d.id === id ? { ...d, ...patch } : d)) });
 }
 
 export function removeDef(project: ProjectState, id: string): ProjectState {
-  return {
+  return rehangCeilingInstances({
     ...project,
     defs: project.defs.filter((d) => d.id !== id),
     instances: project.instances.filter((i) => i.defId !== id),
-  };
+  });
 }
 
 export interface InstanceResult {
@@ -171,7 +202,9 @@ export function addInstance(project: ProjectState, defId: string): InstanceResul
     env.maxZ - d / 2
   );
   const y = clamp(snap(env.minY, GRID_SNAP), env.minY, env.maxY);
-  const instance: PlacedInstance = { id: uuid(), defId, pos: { x, y, z }, rotationY: 0 };
+  // Ceiling items: Y is derived (top pressed against the ceiling / what's
+  // above), so re-clamp the fresh instance instead of leaving it on the floor.
+  const instance: PlacedInstance = reclampDoorInstance(project, { id: uuid(), defId, pos: { x, y, z }, rotationY: 0 });
   return { project: { ...project, instances: [...project.instances, instance] }, instance };
 }
 
@@ -192,7 +225,8 @@ export function placeInstanceAt(
   let instance: PlacedInstance = { id: uuid(), defId, pos, rotationY };
   if ((def.mountSurface ?? 'floor') === 'door') instance.doorId = doorId ?? 'rear-left';
   instance = reclampDoorInstance(project, instance);
-  return { project: { ...project, instances: [...project.instances, instance] }, instance };
+  const next = rehangCeilingInstances({ ...project, instances: [...project.instances, instance] });
+  return { project: next, instance: next.instances.find((i) => i.id === instance.id) ?? instance };
 }
 
 export function updateInstance(
@@ -200,14 +234,14 @@ export function updateInstance(
   id: string,
   patch: Partial<Omit<PlacedInstance, 'id'>>
 ): ProjectState {
-  return {
+  return rehangCeilingInstances({
     ...project,
     instances: project.instances.map((i) => (i.id === id ? reclampDoorInstance(project, { ...i, ...patch }) : i)),
-  };
+  });
 }
 
 export function moveInstanceDelta(project: ProjectState, id: string, delta: Partial<Vec3>): ProjectState {
-  return {
+  return rehangCeilingInstances({
     ...project,
     instances: project.instances.map((i) => {
       if (i.id !== id) return i;
@@ -218,11 +252,11 @@ export function moveInstanceDelta(project: ProjectState, id: string, delta: Part
       };
       return reclampDoorInstance(project, { ...i, pos });
     }),
-  };
+  });
 }
 
 export function removeInstance(project: ProjectState, id: string): ProjectState {
-  return { ...project, instances: project.instances.filter((i) => i.id !== id) };
+  return rehangCeilingInstances({ ...project, instances: project.instances.filter((i) => i.id !== id) });
 }
 
 export function duplicateInstance(project: ProjectState, id: string): InstanceResult | OpError {
@@ -233,7 +267,8 @@ export function duplicateInstance(project: ProjectState, id: string): InstanceRe
     id: uuid(),
     pos: { x: src.pos.x + 2, y: src.pos.y, z: src.pos.z + 2 },
   });
-  return { project: { ...project, instances: [...project.instances, copy] }, instance: copy };
+  const next = rehangCeilingInstances({ ...project, instances: [...project.instances, copy] });
+  return { project: next, instance: next.instances.find((i) => i.id === copy.id) ?? copy };
 }
 
 export interface ResolveResult {

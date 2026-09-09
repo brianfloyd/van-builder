@@ -15,11 +15,11 @@ instances already at their target Qty.
 ## Table format
 
 ```markdown
-| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | Notes |
-|---|---|---|---|---|---|---|---|---|---|
-| electrical | Lithium Battery (100Ah) | 2 | | | | | 450 | final | Existing catalog match, just tracking qty/cost |
-| appliance | Isotherm CR85 Fridge | 1 | 20.7 | 18.1 | 20.7 | floor | 899 | final | Replaces generic 12V Compressor Fridge |
-| plumbing | Grey water dump valve | 1 | TBD | TBD | TBD | underbody | TBD | placeholder | Need to pick a model |
+| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | URL | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| electrical | Lithium Battery (100Ah) | 2 | | | | | 450 | final | | Existing catalog match, just tracking qty/cost |
+| appliance | Isotherm CR85 Fridge | 1 | 20.7 | 18.1 | 20.7 | floor | 899 | final | | Replaces generic 12V Compressor Fridge |
+| plumbing | Grey water dump valve | 1 | TBD | TBD | TBD | underbody | TBD | placeholder | | Need to pick a model |
 ```
 
 - **Column order doesn't matter** and columns can be omitted — the importer
@@ -44,6 +44,7 @@ instances already at their target Qty.
 | `MountSurface` | no (default `floor`) | `floor`, `roof` (roof-mounted gear), or `underbody` (frame-mounted, e.g. tanks). |
 | `Cost` | no | Estimated unit cost in USD, plain number (no `$`/commas needed, they're stripped). `TBD` if unknown. |
 | `Status` | no (inferred) | `final` once name + dims + cost are all locked in, otherwise `placeholder`. If omitted, the importer infers it from whether dims/cost are filled in. |
+| `URL` | no | Product / spec-sheet link (Amazon listing, manufacturer page). Header aliases: `Link`. Shows as a clickable link in the app's catalog sheet view. |
 | `Notes` | no | Anything relevant — wiring/plumbing dependencies, model links, install order, why this replaces a stock catalog part, etc. |
 
 ## Existing starter catalog (44 parts)

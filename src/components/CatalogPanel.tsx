@@ -11,6 +11,7 @@ export default function CatalogPanel() {
   const addInstance = useStore((s) => s.addInstance);
   const instances = useStore((s) => s.instances);
   const selectedInstanceId = useStore((s) => s.selectedInstanceId);
+  const openSheet = useStore((s) => s.setCatalogSheetOpen);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
@@ -55,7 +56,12 @@ export default function CatalogPanel() {
 
   return (
     <div className="section">
-      <h2>Component Catalog</h2>
+      <div className="section-header-row">
+        <h2>Component Catalog</h2>
+        <button className="link-btn" title="Open every part as a sortable spreadsheet — pricing, dims, links, notes" onClick={() => openSheet(true)}>
+          ⊞ Sheet view
+        </button>
+      </div>
       <div className="catalog-list">
         {defs.map((d) => {
           const usageCount = instances.filter((i) => i.defId === d.id).length;
@@ -76,6 +82,8 @@ export default function CatalogPanel() {
                     <span className="name">{d.name}</span>
                     {d.mountSurface === 'roof' && <span className="roof-badge">roof</span>}
                     {d.mountSurface === 'underbody' && <span className="roof-badge underbody-badge">underbody</span>}
+                    {d.mountSurface === 'door' && <span className="roof-badge">door</span>}
+                    {d.mountSurface === 'ceiling' && <span className="roof-badge">ceiling</span>}
                   </div>
                   <span className="dims">
                     {d.dims.w}×{d.dims.d}×{d.dims.h}"
@@ -158,6 +166,8 @@ export default function CatalogPanel() {
                       <option value="floor">Floor / interior</option>
                       <option value="roof">Roof (own layout plane)</option>
                       <option value="underbody">Underbody (own layout plane)</option>
+                      <option value="door">Rear door (swings open with the door)</option>
+                      <option value="ceiling">Ceiling (hangs from above, hugs ceiling / bed underside)</option>
                     </select>
                   </div>
                   <div className="field-row">
@@ -177,6 +187,15 @@ export default function CatalogPanel() {
                       onChange={(e) =>
                         updateDef(d.id, { estCost: e.target.value === '' ? undefined : parseFloat(e.target.value) || 0 })
                       }
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label>URL</label>
+                    <input
+                      type="url"
+                      placeholder="product / spec link"
+                      value={d.url ?? ''}
+                      onChange={(e) => updateDef(d.id, { url: e.target.value.trim() || undefined })}
                     />
                   </div>
                   <div className="field-row">
@@ -277,6 +296,7 @@ export default function CatalogPanel() {
               <option value="roof">Roof (own layout plane)</option>
               <option value="underbody">Underbody (own layout plane)</option>
               <option value="door">Rear door (swings open with the door)</option>
+              <option value="ceiling">Ceiling (hangs from above, hugs ceiling / bed underside)</option>
             </select>
           </div>
           <div className="field-row">

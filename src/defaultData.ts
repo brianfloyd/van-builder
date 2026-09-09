@@ -4,7 +4,7 @@ import type { ComponentDef, OverlapMatrix, VanShell } from './types';
 export const DEFAULT_SHELL: VanShell = {
   name: 'Ram ProMaster 159" EXT High Roof',
   interiorLength: 160.2,
-  interiorWidth: 75.6, // max width at wall; narrows to ~55.8" between wheel arches (not yet modeled)
+  interiorWidth: 75.6, // max width at wall; narrows to ~55.8" between wheel arches — see wheelWell* below
   interiorHeight: 76,
   wallFramingThickness: 0.75, // furring strip / scaffold depth
   insulationThickness: 1.5, // e.g. Havelock wool or XPS layer
@@ -33,6 +33,21 @@ export const DEFAULT_SHELL: VanShell = {
 
   // Height budget below the floor for undercarriage-mounted gear (tanks, etc).
   underbodyClearance: 10,
+
+  // Rear wheel wells — approximated from community-measured Ram ProMaster
+  // 159" conversion sources (Ram doesn't publish interior wheel-well
+  // dimensions): ~55.8" clear width between the arches at floor level (=>
+  // ~9.9"/side intrusion off a 75.6" interior width, rounded to 10), ~17"
+  // arch height, ~34" front-to-back length on the extended wheelbase.
+  // Longitudinal position is the least certain of the bunch (no single
+  // agreed-upon reference point in the sources) — placed with a modest gap
+  // ahead of the rear doors as a starting point. Adjust all four to your own
+  // tape-measure numbers before cutting anything. Front wheel wells aren't
+  // modeled — they fall inside the cab zone, which is already off-limits.
+  wheelWellWidth: 10,
+  wheelWellHeight: 17,
+  wheelWellLength: 34,
+  rearWheelWellCenterZ: 126.2,
 };
 
 // A starter, standardized component catalog. Dimensions are W (across) x D

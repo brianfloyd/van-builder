@@ -3,6 +3,7 @@ dist
 .DS_Store
 *.local
 *.tsbuildinfo
+vite.config.ts.timestamp-*.mjs
 
 # MCP file-bridge working state — live layout + saved variants, not source
 van-builder-project.json

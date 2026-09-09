@@ -16,7 +16,7 @@ import type { ProjectState } from './types';
 
 const POST_DEBOUNCE_MS = 300;
 
-export function initDevSync() {
+export function initDevSync(opts: { readOnly?: boolean } = {}) {
   if (!import.meta.env.DEV) return;
 
   let applyingRemoteUpdate = false;
@@ -52,6 +52,10 @@ export function initDevSync() {
   // Keep the bridge file in sync with the browser's own state too, so a
   // person editing in the UI doesn't get silently overwritten by whatever
   // an agent wrote earlier, and an agent reading the file sees your edits.
+  // Viewer mode (phone) never writes back — a second device with its own
+  // stale localStorage must not be able to clobber the desktop's layout.
+  if (opts.readOnly) return;
+
   useStore.subscribe((state) => {
     if (applyingRemoteUpdate) return;
     if (postTimer) clearTimeout(postTimer);

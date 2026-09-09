@@ -31,6 +31,24 @@ interface StoreState {
   showClearances: boolean;
   toggleClearances: () => void;
 
+  /** Whether every placed item shows a floating label (its override label,
+   * else its component name) in the 3D view. Off by default — a fully
+   * loaded van gets visually noisy fast. Transient UI state, not
+   * persisted. */
+  showLabels: boolean;
+  toggleLabels: () => void;
+  /** Read-only "walk-around" mode (phones / ?viewer): the 3D view can be
+   * orbited and labels toggled, but nothing can be selected, dragged or
+   * edited, and nothing is written back to the bridge file. Transient. */
+  viewerMode: boolean;
+  setViewerMode: (on: boolean) => void;
+
+  /** Whether the full-screen Catalog Sheet (spreadsheet view of every
+   * component def — pricing, dims, links, notes) is open over the editor.
+   * Transient UI state; ?catalog in the URL opens it on load. */
+  catalogSheetOpen: boolean;
+  setCatalogSheetOpen: (on: boolean) => void;
+
   /** One-shot camera-snap request consumed by the Scene. Always a fresh
    * object so requesting the same view twice in a row still fires. */
   cameraViewRequest: { view: CameraView; nonce: number } | null;
@@ -104,6 +122,15 @@ export const useStore = create<StoreState>((set, get) => ({
 
   showClearances: false,
   toggleClearances: () => set((s) => ({ showClearances: !s.showClearances })),
+
+  showLabels: false,
+  toggleLabels: () => set((s) => ({ showLabels: !s.showLabels })),
+
+  viewerMode: false,
+  setViewerMode: (on) => set({ viewerMode: on, selectedInstanceId: null }),
+
+  catalogSheetOpen: false,
+  setCatalogSheetOpen: (on) => set({ catalogSheetOpen: on }),
 
   cameraViewRequest: null,
   requestCameraView: (view) => set({ cameraViewRequest: { view, nonce: Date.now() + Math.random() } }),
