@@ -14,6 +14,8 @@ npm run dev
 
 Then open the printed local URL (usually `http://localhost:5173`).
 
+Geometry tests: `npm test` (vitest).
+
 ## How it's modeled
 
 **Van shell → buildable envelope.** You enter the van's raw interior
@@ -141,6 +143,8 @@ running app hot-reloads ┘   (file-watch + HTTP bridge)  └─ external Claude
 - **Start it:** `npm run mcp` runs it standalone over stdio, or it's already
   registered for Claude Code via `.mcp.json` at the repo root — just restart
   `claude` in this project and the `van-builder` server is available.
+  Cowork already reaches this stdio server through Claude Desktop's local
+  MCP proxy. Do **not** give it the HTTP+bearer treatment FAIT-MCP uses.
 - **While `npm run dev` is also running**, changes the MCP server makes
   hot-reload straight into the open browser tab (no refresh), and your own
   UI edits get written back to the same file — so the two stay in sync in
