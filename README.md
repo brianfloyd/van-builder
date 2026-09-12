@@ -140,21 +140,76 @@ you edit in the UI  ─┐                          ┌─ MCP tool calls
 running app hot-reloads ┘   (file-watch + HTTP bridge)  └─ external Claude
 ```
 
-- **Start it:** `npm run mcp` runs it standalone over stdio, or it's already
-  registered for Claude Code via `.mcp.json` at the repo root — just restart
-  `claude` in this project and the `van-builder` server is available.
-  Cowork already reaches this stdio server through Claude Desktop's local
-  MCP proxy. Do **not** give it the HTTP+bearer treatment FAIT-MCP uses.
+### Two transports: stdio (local) and HTTP (remote)
+
+| Transport | Command | Use case |
+|-----------|---------|----------|
+| **stdio** | `npm run mcp` | Claude Desktop/Code via `.mcp.json` |
+| **HTTP** | `npm run mcp:http` | Remote agents (Grok Bot, Parts Bot) via Tailscale Funnel |
+
+Both transports share the exact same tools and project file.
+
+#### stdio transport (default)
+
+- `npm run mcp` runs it standalone over stdio
+- Already registered for Claude Code via `.mcp.json` at the repo root — just
+  restart `claude` in this project and the `van-builder` server is available
+- Cowork reaches this stdio server through Claude Desktop's local MCP proxy
+
+#### HTTP transport (for remote agents)
+
+For agents that can't run stdio locally (Grok Bot, Parts Bot on Core), the
+HTTP transport exposes the same MCP tools over Streamable HTTP:
+
+```bash
+# Start the HTTP server (default port 8767, loopback only)
+npm run mcp:http
+
+# With custom port
+VAN_BUILDER_MCP_PORT=9000 npm run mcp:http
+
+# With bearer token authentication
+VAN_BUILDER_MCP_TOKEN=your-secret-token npm run mcp:http
+```
+
+**Endpoints:**
+- `/mcp` — MCP Streamable HTTP endpoint (POST/GET)
+- `/health` — Health check (GET)
+
+**Expose via Tailscale Funnel:**
+
+```bash
+# Run the MCP server
+npm run mcp:http
+
+# In another terminal, expose via Tailscale Funnel
+tailscale funnel --bg --https=8444 localhost:8767
+```
+
+This creates a public HTTPS URL like `https://your-machine.tail12345.ts.net:8444`.
+
+**Configure Grok Bot / Parts Bot:**
+- **URL:** `https://your-machine.tail12345.ts.net:8444/mcp`
+- **Auth:** Bearer token if you set `VAN_BUILDER_MCP_TOKEN` (recommended when
+  exposing over the internet; loopback-only with Funnel is also secure)
+
+**Environment variables:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VAN_BUILDER_MCP_PORT` | `8767` | HTTP server port |
+| `VAN_BUILDER_MCP_TOKEN` | (none) | Bearer token for auth (optional) |
+
+### Common details (both transports)
+
 - **While `npm run dev` is also running**, changes the MCP server makes
   hot-reload straight into the open browser tab (no refresh), and your own
   UI edits get written back to the same file — so the two stay in sync in
   both directions. Without the dev server, the file just updates directly.
 - **Tools:** `list_catalog`, `get_layout` (shell + instances + live
-  conflicts), `place_item` / `place_items` (batch), `move_item`,
-  `remove_item`, `check_conflicts`, `snap_to_safe`, `set_shell_dimensions`,
-  `save_variant` / `load_variant` / `list_variants` (named snapshots, so you
-  can compare candidate layouts instead of overwriting your one working
-  layout each time).
+  conflicts), `add_def`, `update_def`, `place_item` / `place_items` (batch),
+  `move_item`, `remove_item`, `check_conflicts`, `snap_to_safe`,
+  `get_clearances`, `set_shell_dimensions`, `save_variant` / `load_variant` /
+  `list_variants` (named snapshots), `import_checklist` / `export_checklist`.
 - **One source of truth for the logic:** every tool calls straight into
   [src/projectOps.ts](src/projectOps.ts) and [src/geometry.ts](src/geometry.ts)
   — the exact same placement/collision/resolve functions `store.ts` (the
@@ -203,7 +258,9 @@ src/
     ViolationsPanel.tsx
 
 mcp-server/
-  index.ts           MCP server entrypoint — registers all tools over stdio
+  server.ts          Shared MCP server setup — tool registration independent of transport
+  index.ts           stdio transport entrypoint (for Claude Desktop/Code)
+  http.ts            HTTP transport entrypoint (for remote agents via Tailscale Funnel)
   projectFile.ts      Node-side read/write of the bridge file + save/load/list variants
 
 bridge-paths.ts        Node-only file paths (bridge file, variants dir) — repo root, NOT src/,
