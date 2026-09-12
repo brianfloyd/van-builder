@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "mcp": "tsx mcp-server/index.ts",
+    "mcp:http": "tsx mcp-server/http.ts",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
     "scrape": "tsx scripts/scrape-product.ts"
   },
