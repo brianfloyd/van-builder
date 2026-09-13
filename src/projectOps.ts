@@ -11,30 +11,33 @@
 // here needs to be extracted or rewritten to get there.
 
 import { v4 as uuid } from 'uuid';
-import type { ComponentDef, DoorId, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3 } from './types';
+import type { ComponentDef, DoorId, OverlapMatrix, PlacedInstance, ProjectState, VanShell, Vec3, WallSide } from './types';
 import {
   clamp,
   clampToCeiling,
   clampToDoorPanel,
+  clampToWall,
   computeClearances,
   computeDoorEnvelope,
+  computeWallEnvelope,
   envelopeFor,
   findNearestValidPosition,
   findViolations,
   requiredDoorTouchZ,
+  requiredWallTouchX,
   rotatedDims,
   snap,
   type Clearances,
   type Violation,
 } from './geometry';
 
-/** Door-mount instances must stay flush against their panel — this re-clamps
- * X/Y into the panel bounds and forces Z back to the touching position after
- * ANY change to a door-mount instance's position, rotation, or doorId. Not
- * just a validity check: the constraint is enforced here so "moved away from
- * the exterior" is unreachable, not just flagged red. No-op for every other
- * mount surface. */
-function reclampDoorInstance(project: ProjectState, inst: PlacedInstance): PlacedInstance {
+/** Constrained-mount instances (door, wall, ceiling) must stay flush against
+ * their mounting surface — this re-clamps position into bounds and forces
+ * the constrained axis back to the touching position after ANY change.
+ * Not just a validity check: the constraint is enforced here so "moved away
+ * from the mount surface" is unreachable, not just flagged red. No-op for
+ * floor/roof/underbody surfaces. */
+function reclampConstrainedInstance(project: ProjectState, inst: PlacedInstance): PlacedInstance {
   const def = project.defs.find((d) => d.id === inst.defId);
   if (!def) return inst;
   const surface = def.mountSurface ?? 'floor';
@@ -43,11 +46,19 @@ function reclampDoorInstance(project: ProjectState, inst: PlacedInstance): Place
     const pos = clampToCeiling(project.shell, dims, inst.pos, inst, def, project.instances, defsById(project));
     return { ...inst, pos };
   }
-  if (surface !== 'door') return inst;
-  const doorId: DoorId = inst.doorId ?? 'rear-left';
-  const dims = rotatedDims(def.dims, inst.rotationY);
-  const pos = clampToDoorPanel(project.shell, doorId, dims, inst.pos);
-  return { ...inst, doorId, pos };
+  if (surface === 'door') {
+    const doorId: DoorId = inst.doorId ?? 'rear-left';
+    const dims = rotatedDims(def.dims, inst.rotationY);
+    const pos = clampToDoorPanel(project.shell, doorId, dims, inst.pos);
+    return { ...inst, doorId, pos };
+  }
+  if (surface === 'wall') {
+    const wallSide: WallSide = inst.wallSide ?? 'left';
+    const dims = rotatedDims(def.dims, inst.rotationY);
+    const pos = clampToWall(project.shell, wallSide, dims, inst.pos);
+    return { ...inst, wallSide, pos };
+  }
+  return inst;
 }
 
 /** Ceiling-hung items derive their Y from whatever is above them, so ANY
@@ -182,6 +193,23 @@ export function addInstance(project: ProjectState, defId: string): InstanceResul
     return { project: { ...project, instances: [...project.instances, instance] }, instance };
   }
 
+  if ((def.mountSurface ?? 'floor') === 'wall') {
+    const wallSide: WallSide = 'left';
+    const count = project.instances.filter((i) => i.defId === defId && (i.wallSide ?? 'left') === wallSide).length;
+    const env = computeWallEnvelope(project.shell, wallSide, def.dims.w);
+    const halfD = def.dims.d / 2;
+    const cz = clamp(env.minZ + halfD + count * 4, env.minZ + halfD, Math.max(env.minZ + halfD, env.maxZ - halfD));
+    const x = requiredWallTouchX(project.shell, wallSide, def.dims.w);
+    const instance: PlacedInstance = {
+      id: uuid(),
+      defId,
+      pos: { x, y: snap(env.minY, GRID_SNAP), z: snap(cz, GRID_SNAP) },
+      rotationY: 0,
+      wallSide,
+    };
+    return { project: { ...project, instances: [...project.instances, instance] }, instance };
+  }
+
   const env = envelopeFor(project.shell, def.mountSurface);
   const count = project.instances.filter((i) => i.defId === defId).length;
   const w = def.dims.w;
@@ -204,7 +232,7 @@ export function addInstance(project: ProjectState, defId: string): InstanceResul
   const y = clamp(snap(env.minY, GRID_SNAP), env.minY, env.maxY);
   // Ceiling items: Y is derived (top pressed against the ceiling / what's
   // above), so re-clamp the fresh instance instead of leaving it on the floor.
-  const instance: PlacedInstance = reclampDoorInstance(project, { id: uuid(), defId, pos: { x, y, z }, rotationY: 0 });
+  const instance: PlacedInstance = reclampConstrainedInstance(project, { id: uuid(), defId, pos: { x, y, z }, rotationY: 0 });
   return { project: { ...project, instances: [...project.instances, instance] }, instance };
 }
 
@@ -218,13 +246,15 @@ export function placeInstanceAt(
   defId: string,
   pos: Vec3,
   rotationY: 0 | 90 | 180 | 270 = 0,
-  doorId?: DoorId
+  doorId?: DoorId,
+  wallSide?: WallSide
 ): InstanceResult | OpError {
   const def = project.defs.find((d) => d.id === defId);
   if (!def) return { error: `No component def with id "${defId}"` };
   let instance: PlacedInstance = { id: uuid(), defId, pos, rotationY };
   if ((def.mountSurface ?? 'floor') === 'door') instance.doorId = doorId ?? 'rear-left';
-  instance = reclampDoorInstance(project, instance);
+  if ((def.mountSurface ?? 'floor') === 'wall') instance.wallSide = wallSide ?? 'left';
+  instance = reclampConstrainedInstance(project, instance);
   const next = rehangCeilingInstances({ ...project, instances: [...project.instances, instance] });
   return { project: next, instance: next.instances.find((i) => i.id === instance.id) ?? instance };
 }
@@ -236,7 +266,7 @@ export function updateInstance(
 ): ProjectState {
   return rehangCeilingInstances({
     ...project,
-    instances: project.instances.map((i) => (i.id === id ? reclampDoorInstance(project, { ...i, ...patch }) : i)),
+    instances: project.instances.map((i) => (i.id === id ? reclampConstrainedInstance(project, { ...i, ...patch }) : i)),
   });
 }
 
@@ -250,7 +280,7 @@ export function moveInstanceDelta(project: ProjectState, id: string, delta: Part
         y: snap(i.pos.y + (delta.y ?? 0), GRID_SNAP),
         z: snap(i.pos.z + (delta.z ?? 0), GRID_SNAP),
       };
-      return reclampDoorInstance(project, { ...i, pos });
+      return reclampConstrainedInstance(project, { ...i, pos });
     }),
   });
 }
@@ -262,7 +292,7 @@ export function removeInstance(project: ProjectState, id: string): ProjectState 
 export function duplicateInstance(project: ProjectState, id: string): InstanceResult | OpError {
   const src = project.instances.find((i) => i.id === id);
   if (!src) return { error: `No placed instance with id "${id}"` };
-  const copy = reclampDoorInstance(project, {
+  const copy = reclampConstrainedInstance(project, {
     ...src,
     id: uuid(),
     pos: { x: src.pos.x + 2, y: src.pos.y, z: src.pos.z + 2 },

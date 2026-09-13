@@ -271,6 +271,33 @@ vite-project-bridge.ts dev-only Vite plugin: GET/POST /api/project + file-watch 
 .mcp.json              registers the MCP server for Claude Code in this project
 ```
 
+## Inventory tracking, tags & wall mounts
+
+**Inventory status.** Each catalog component can track its purchase/inventory
+lifecycle via `inventoryStatus`:
+- `proposed` — wishlist / planning item, not yet committed
+- `ordered` — purchase placed, awaiting delivery
+- `owned` — in hand, ready to install
+- `placed` — installed in the van
+- `superseded` — replaced by another part, kept for reference
+
+When reading legacy JSON missing this field, the app infers: `proposed` if
+status is `placeholder`, `owned` if `placedCount > 0`, else `proposed`.
+Optional fields `orderUrl`, `orderDate` (ISO string), and `vendor` track
+purchase details.
+
+**Tags.** Free-form string array for filtering/organization. Suggested
+vocabulary (not enforced): `fait`, `capture`, `structural`, `electrical`,
+`plumbing`, `kitchen`, `furniture`, `exterior`, `consumable`. Filterable in
+the UI; required in MCP `add_def`/`update_def`/`list_catalog`/`export_checklist`.
+
+**Wall mount surface.** `mountSurface: 'wall'` mounts items flush against an
+interior side wall (left or right, selected via `wallSide` on the instance).
+Wall items extend inward from the wall surface and collide with interior
+floor/ceiling items. Geometry assumption: the item's W dimension is its
+depth off the wall (how far it sticks in), D is along the wall length, H is
+height. X is pinned flush; Y/Z slide along the wall plane.
+
 ## Where to go next
 
 Ideas worth adding as this grows:

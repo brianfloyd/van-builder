@@ -35,6 +35,7 @@ function describeInstance(project: ProjectState, inst: PlacedInstance) {
     rotationY: inst.rotationY,
     locked: inst.locked ?? false,
     doorId: def?.mountSurface === 'door' ? inst.doorId ?? 'rear-left' : undefined,
+    wallSide: def?.mountSurface === 'wall' ? inst.wallSide ?? 'left' : undefined,
   };
 }
 
@@ -43,7 +44,15 @@ function violationsFor(project: ProjectState, instanceId?: string) {
   return instanceId ? all.filter((v) => v.instanceIds.includes(instanceId)) : all;
 }
 
+function inferInventoryStatus(def: ComponentDef, placedCount: number): string {
+  if (def.inventoryStatus) return def.inventoryStatus;
+  if ((def.status ?? 'final') === 'placeholder') return 'proposed';
+  if (placedCount > 0) return 'owned';
+  return 'proposed';
+}
+
 function describeDef(project: ProjectState, def: ComponentDef) {
+  const placedCount = project.instances.filter((i) => i.defId === def.id).length;
   return {
     id: def.id,
     name: def.name,
@@ -57,7 +66,12 @@ function describeDef(project: ProjectState, def: ComponentDef) {
     url: def.url,
     wheelWellCutout: def.wheelWellCutout,
     ports: def.ports,
-    placedCount: project.instances.filter((i) => i.defId === def.id).length,
+    placedCount,
+    inventoryStatus: inferInventoryStatus(def, placedCount),
+    orderUrl: def.orderUrl,
+    orderDate: def.orderDate,
+    vendor: def.vendor,
+    tags: def.tags ?? [],
   };
 }
 
@@ -75,6 +89,11 @@ interface ChecklistRow {
   mountSurface: string | null;
   cost: number | null;
   status: string | null;
+  inventoryStatus: string | null;
+  tags: string;
+  vendor: string;
+  orderUrl: string;
+  orderDate: string;
   notes: string;
   url: string;
 }
@@ -89,6 +108,11 @@ const HEADER_ALIASES: Record<string, keyof ChecklistRow | 'skip'> = {
   mountsurface: 'mountSurface', mount: 'mountSurface', surface: 'mountSurface',
   cost: 'cost', price: 'cost', estcost: 'cost',
   status: 'status',
+  inventorystatus: 'inventoryStatus', inventory: 'inventoryStatus',
+  tags: 'tags', tag: 'tags',
+  vendor: 'vendor', supplier: 'vendor',
+  orderurl: 'orderUrl', orderlink: 'orderUrl',
+  orderdate: 'orderDate',
   notes: 'notes', note: 'notes',
   url: 'url', link: 'url', urls: 'url',
 };
@@ -148,6 +172,11 @@ function parseChecklist(markdown: string): { rows: ChecklistRow[]; warnings: str
       category: get('category').toLowerCase(),
       item,
       qty: qtyRaw && qtyRaw > 0 ? Math.round(qtyRaw) : 1,
+      inventoryStatus: get('inventoryStatus').toLowerCase() || null,
+      tags: get('tags'),
+      vendor: get('vendor'),
+      orderUrl: get('orderUrl'),
+      orderDate: get('orderDate'),
       w: parseNum(get('w')),
       d: parseNum(get('d')),
       h: parseNum(get('h')),
@@ -171,9 +200,15 @@ const categorySchema = z.enum([
   'storage', 'cabinet', 'appliance', 'electrical', 'water', 'plumbing', 'lighting', 'roof', 'other',
 ]);
 const statusSchema = z.enum(['final', 'placeholder']);
-const mountSurfaceSchema = z.enum(['floor', 'roof', 'underbody', 'door', 'ceiling']);
+const inventoryStatusSchema = z.enum(['owned', 'ordered', 'proposed', 'placed', 'superseded']);
+const mountSurfaceSchema = z.enum(['floor', 'roof', 'underbody', 'door', 'ceiling', 'wall']);
 const doorIdSchema = z.enum(['rear-left', 'rear-right']);
+const wallSideSchema = z.enum(['left', 'right']);
 const portKindSchema = z.enum(['fill', 'vent', 'outlet', 'inlet', 'drain', 'electrical', 'other']);
+const tagsSchema = z.array(z.string()).optional().describe(
+  'Free-form string tags for filtering/organization. Suggested vocabulary: fait, capture, structural, ' +
+    'electrical, plumbing, kitchen, furniture, exterior, consumable. Any string is accepted.'
+);
 const portsSchema = z
   .array(
     z.object({
@@ -196,24 +231,25 @@ const portsSchema = z
 const placeItemShape = {
   componentId: z.string().describe('A def id from list_catalog.'),
   plane: z
-    .enum(['floor', 'roof', 'underbody', 'door', 'ceiling'])
+    .enum(['floor', 'roof', 'underbody', 'door', 'ceiling', 'wall'])
     .optional()
     .describe(
       'Optional sanity check, not a placement choice — each component already has a fixed mount ' +
         'surface (see list_catalog). If given, it must match that component\'s actual surface or the ' +
         'call fails with an error instead of silently placing it on the wrong plane.'
     ),
-  x: z.number().describe('Footprint center, inches from the left wall (x=0).'),
+  x: z.number().describe('Footprint center, inches from the left wall (x=0). For "wall" components this is IGNORED — it\'s auto-computed so the item sits flush against the wall.'),
   y: z.number().describe('Base height, inches. 0 = that plane\'s floor (van floor for "floor", roof surface for "roof", van floor underside for "underbody", height on the door panel for "door"), where negative values go further down. IGNORED for "ceiling" components — y is auto-derived so the top hugs the ceiling / the item above.'),
   z: z.number().describe('Footprint center, inches from the front/cab wall (z=0). For "door" components this is IGNORED — it\'s auto-computed so the item sits flush against the door; pass x/y as if the door were closed.'),
   doorId: doorIdSchema.optional().describe('Which rear door panel to mount on — only used when the component\'s mountSurface is "door" (defaults to "rear-left" if omitted). Ignored otherwise. An item can\'t straddle both panels.'),
+  wallSide: wallSideSchema.optional().describe('Which interior side wall to mount on — only used when the component\'s mountSurface is "wall" (defaults to "left" if omitted). Ignored otherwise.'),
   rotation: rotationSchema.optional().default(0).describe('Yaw in degrees, one of 0/90/180/270.'),
   label: z.string().optional().describe('Optional display label override for this instance.'),
 };
 
 function placeOne(
   project: ProjectState,
-  args: { componentId: string; plane?: string; x: number; y: number; z: number; doorId?: 'rear-left' | 'rear-right'; rotation?: number; label?: string }
+  args: { componentId: string; plane?: string; x: number; y: number; z: number; doorId?: 'rear-left' | 'rear-right'; wallSide?: 'left' | 'right'; rotation?: number; label?: string }
 ): { project: ProjectState; result: unknown; error?: string } {
   const def = project.defs.find((d) => d.id === args.componentId);
   if (!def) {
@@ -228,7 +264,7 @@ function placeOne(
     };
   }
   const rotationY = (args.rotation ?? 0) as 0 | 90 | 180 | 270;
-  const placed = ops.placeInstanceAt(project, args.componentId, { x: args.x, y: args.y, z: args.z }, rotationY, args.doorId);
+  const placed = ops.placeInstanceAt(project, args.componentId, { x: args.x, y: args.y, z: args.z }, rotationY, args.doorId, args.wallSide);
   if ('error' in placed) return { project, result: null, error: placed.error };
   let next = placed.project;
   if (args.label) next = ops.updateInstance(next, placed.instance.id, { label: args.label });
@@ -312,11 +348,19 @@ export function createVanBuilderServer(): McpServer {
         .describe('Footprint at rotation 0, inches: w = across width, d = along length, h = up.'),
       mountSurface: mountSurfaceSchema.optional().describe(
         'Defaults to "floor" if omitted. "ceiling" hangs INSIDE the van from above: it can be placed anywhere in x/z but its y is derived so its top always hugs the finished ceiling, or the underside of whatever floor-plane item is directly above it (e.g. a raised lift bed) — and it follows that item if it moves. It collides with interior items like any floor item. "door" mounts to a rear door panel — it swings open with the ' +
-          'door in the 3D view and is auto-clamped flush against it (see place_item\'s doorId param).'
+          'door in the 3D view and is auto-clamped flush against it (see place_item\'s doorId param). "wall" mounts to an interior side wall — items are flush against the wall surface.'
       ),
       estCost: z.number().min(0).optional().describe('Estimated unit cost in USD. Omit if not priced yet.'),
       status: statusSchema.optional().default('placeholder')
         .describe('"final" once name/dims/cost are locked in; defaults to "placeholder".'),
+      inventoryStatus: inventoryStatusSchema.optional().describe(
+        'Purchase/inventory status: owned (in hand), ordered (awaiting delivery), proposed (planning), ' +
+          'placed (installed), superseded (replaced). New items from Capture/FAIT default to "proposed".'
+      ),
+      orderUrl: z.string().optional().describe('Actual order/receipt URL if different from the spec/buy link in url.'),
+      orderDate: z.string().optional().describe('ISO date string (YYYY-MM-DD) when the order was placed.'),
+      vendor: z.string().optional().describe('Vendor/supplier name for this part.'),
+      tags: tagsSchema,
       notes: z.string().optional(),
       url: z.string().optional().describe(
         'Product / spec-sheet link (Amazon listing, manufacturer page, install manual). Put the canonical ' +
@@ -341,6 +385,11 @@ export function createVanBuilderServer(): McpServer {
         mountSurface: args.mountSurface,
         estCost: args.estCost,
         status: args.status,
+        inventoryStatus: args.inventoryStatus,
+        orderUrl: args.orderUrl,
+        orderDate: args.orderDate,
+        vendor: args.vendor,
+        tags: args.tags,
         notes: args.notes,
         url: args.url,
         overlapGroup: args.overlapGroup,
@@ -367,6 +416,14 @@ export function createVanBuilderServer(): McpServer {
       mountSurface: mountSurfaceSchema.optional(),
       estCost: z.number().min(0).optional(),
       status: statusSchema.optional(),
+      inventoryStatus: inventoryStatusSchema.optional().describe(
+        'Purchase/inventory status: owned (in hand), ordered (awaiting delivery), proposed (planning), ' +
+          'placed (installed), superseded (replaced).'
+      ),
+      orderUrl: z.string().optional().describe('Actual order/receipt URL. Pass empty string to clear.'),
+      orderDate: z.string().optional().describe('ISO date string (YYYY-MM-DD). Pass empty string to clear.'),
+      vendor: z.string().optional().describe('Vendor/supplier name. Pass empty string to clear.'),
+      tags: tagsSchema,
       notes: z.string().optional(),
       url: z.string().optional().describe('Product / spec-sheet link. Pass an empty string to clear it.'),
       overlapGroup: z.string().optional(),
@@ -384,6 +441,9 @@ export function createVanBuilderServer(): McpServer {
       }
       const cleanPatch: Partial<ComponentDef> = { ...patch };
       if (patch.url !== undefined) cleanPatch.url = patch.url.trim() || undefined;
+      if (patch.orderUrl !== undefined) cleanPatch.orderUrl = patch.orderUrl.trim() || undefined;
+      if (patch.orderDate !== undefined) cleanPatch.orderDate = patch.orderDate.trim() || undefined;
+      if (patch.vendor !== undefined) cleanPatch.vendor = patch.vendor.trim() || undefined;
       const next = ops.updateDef(project, id, cleanPatch);
       writeProject(next);
       const def = next.defs.find((d) => d.id === id)!;
@@ -429,18 +489,20 @@ export function createVanBuilderServer(): McpServer {
   server.tool(
     'move_item',
     'Move and/or rotate an existing placed instance. Only the fields you pass change — omit x/y/z/' +
-      'rotation/doorId to leave them as-is. Same coordinate convention as place_item. For a "door"-' +
+      'rotation/doorId/wallSide to leave them as-is. Same coordinate convention as place_item. For a "door"-' +
       'mount instance, z is always auto-corrected back to flush-against-the-door regardless of what ' +
-      'you pass — it physically can\'t be moved away from the mounting surface.',
+      'you pass — it physically can\'t be moved away from the mounting surface. For a "wall"-mount ' +
+      'instance, x is auto-corrected to stay flush against the wall.',
     {
       instanceId: z.string(),
       x: z.number().optional(),
       y: z.number().optional(),
       z: z.number().optional(),
       doorId: doorIdSchema.optional().describe('Switch which rear door panel a "door"-mount instance rides on.'),
+      wallSide: wallSideSchema.optional().describe('Switch which side wall a "wall"-mount instance is on.'),
       rotation: rotationSchema.optional(),
     },
-    async ({ instanceId, x, y, z, doorId, rotation }): Promise<CallToolResult> => {
+    async ({ instanceId, x, y, z, doorId, wallSide, rotation }): Promise<CallToolResult> => {
       const project = readProject();
       const inst = project.instances.find((i) => i.id === instanceId);
       if (!inst) return fail(`No placed instance with id "${instanceId}". Call get_layout for valid ids.`);
@@ -448,6 +510,7 @@ export function createVanBuilderServer(): McpServer {
       const patch: Partial<Omit<PlacedInstance, 'id'>> = { pos };
       if (rotation !== undefined) patch.rotationY = rotation;
       if (doorId !== undefined) patch.doorId = doorId;
+      if (wallSide !== undefined) patch.wallSide = wallSide;
       const next = ops.updateInstance(project, instanceId, patch);
       writeProject(next);
       const updated = next.instances.find((i) => i.id === instanceId)!;
@@ -640,9 +703,15 @@ export function createVanBuilderServer(): McpServer {
           warnings.push(`"${row.item}": unrecognized category "${row.category}" — filed under "other".`);
         }
         const mountSurface =
-          row.mountSurface && ['floor', 'roof', 'underbody', 'door', 'ceiling'].includes(row.mountSurface)
-            ? (row.mountSurface as 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling')
+          row.mountSurface && ['floor', 'roof', 'underbody', 'door', 'ceiling', 'wall'].includes(row.mountSurface)
+            ? (row.mountSurface as 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling' | 'wall')
             : undefined;
+
+        const rowInventoryStatus =
+          row.inventoryStatus && ['owned', 'ordered', 'proposed', 'placed', 'superseded'].includes(row.inventoryStatus)
+            ? (row.inventoryStatus as 'owned' | 'ordered' | 'proposed' | 'placed' | 'superseded')
+            : undefined;
+        const rowTags = row.tags ? row.tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined;
 
         let def = project.defs.find((d) => d.name.toLowerCase() === row.item.toLowerCase());
         const dimsGiven = row.w != null && row.d != null && row.h != null;
@@ -655,6 +724,11 @@ export function createVanBuilderServer(): McpServer {
           if (dimsGiven) patch.dims = { w: row.w!, d: row.d!, h: row.h! };
           if (row.cost != null) patch.estCost = row.cost;
           if (rowStatus) patch.status = rowStatus;
+          if (rowInventoryStatus) patch.inventoryStatus = rowInventoryStatus;
+          if (rowTags && rowTags.length > 0) patch.tags = rowTags;
+          if (row.vendor) patch.vendor = row.vendor;
+          if (row.orderUrl) patch.orderUrl = row.orderUrl;
+          if (row.orderDate) patch.orderDate = row.orderDate;
           if (row.notes) patch.notes = row.notes;
           if (row.url) patch.url = row.url;
           if (mountSurface) patch.mountSurface = mountSurface;
@@ -664,13 +738,19 @@ export function createVanBuilderServer(): McpServer {
             updatedDefs.push(describeDef(project, def));
           }
         } else {
+          const inferredStatus = rowStatus ?? (dimsGiven && row.cost != null ? 'final' : 'placeholder');
           const created = ops.addDef(project, {
             name: row.item,
             category,
             dims: dimsGiven ? { w: row.w!, d: row.d!, h: row.h! } : { w: 12, d: 12, h: 12 },
             mountSurface,
             estCost: row.cost ?? undefined,
-            status: rowStatus ?? (dimsGiven && row.cost != null ? 'final' : 'placeholder'),
+            status: inferredStatus,
+            inventoryStatus: rowInventoryStatus ?? (inferredStatus === 'placeholder' ? 'proposed' : undefined),
+            tags: rowTags,
+            vendor: row.vendor || undefined,
+            orderUrl: row.orderUrl || undefined,
+            orderDate: row.orderDate || undefined,
             notes: row.notes || undefined,
             url: row.url || undefined,
           });
@@ -723,18 +803,20 @@ export function createVanBuilderServer(): McpServer {
     'Render the current live catalog + placed counts as a Markdown checklist table in the same ' +
       'format import_checklist reads (docs/checklist-template.md) — the running "what have we ' +
       'covered" blueprint. Includes every catalog def, even ones with zero placed instances yet ' +
-      '(Qty 0 = planned but not placed).',
+      '(Qty 0 = planned but not placed). Includes InventoryStatus, Tags, Vendor, OrderUrl, OrderDate columns.',
     {},
     async (): Promise<CallToolResult> => {
       const project = readProject();
-      const header = '| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | URL | Notes |';
-      const sep = '|---|---|---|---|---|---|---|---|---|---|---|';
+      const header = '| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | InventoryStatus | Tags | Vendor | OrderUrl | OrderDate | URL | Notes |';
+      const sep = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|';
       const lines = [header, sep];
       for (const d of [...project.defs].sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))) {
-        const qty = project.instances.filter((i) => i.defId === d.id).length;
+        const placedCount = project.instances.filter((i) => i.defId === d.id).length;
         const cost = d.estCost != null ? String(d.estCost) : 'TBD';
+        const invStatus = inferInventoryStatus(d, placedCount);
+        const tagsStr = (d.tags ?? []).join(', ');
         lines.push(
-          `| ${d.category} | ${d.name} | ${qty} | ${d.dims.w} | ${d.dims.d} | ${d.dims.h} | ${d.mountSurface ?? 'floor'} | ${cost} | ${d.status ?? 'final'} | ${d.url ?? ''} | ${d.notes ?? ''} |`
+          `| ${d.category} | ${d.name} | ${placedCount} | ${d.dims.w} | ${d.dims.d} | ${d.dims.h} | ${d.mountSurface ?? 'floor'} | ${cost} | ${d.status ?? 'final'} | ${invStatus} | ${tagsStr} | ${d.vendor ?? ''} | ${d.orderUrl ?? ''} | ${d.orderDate ?? ''} | ${d.url ?? ''} | ${d.notes ?? ''} |`
         );
       }
       return ok({ markdown: lines.join('\n'), defCount: project.defs.length, totalInstances: project.instances.length });

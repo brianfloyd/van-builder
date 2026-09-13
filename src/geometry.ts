@@ -1,4 +1,4 @@
-import type { ComponentDef, Dims, DoorId, MountSurface, OverlapMatrix, PlacedInstance, VanShell, Vec3 } from './types';
+import type { ComponentDef, Dims, DoorId, MountSurface, OverlapMatrix, PlacedInstance, VanShell, Vec3, WallSide } from './types';
 
 /** Rear door panel thickness (inches) — shared with VanFeaturesMesh so the
  * 3D door geometry and the door-mount placement math never drift apart. */
@@ -95,6 +95,73 @@ export function computeUnderbodyEnvelope(shell: VanShell): Envelope {
   };
 }
 
+/** Interior side wall envelope — items mount flush against the wall surface
+ * (after framing + insulation), extending inward into the van. The envelope
+ * is a thin slice along the wall plane: X is pinned to the wall surface,
+ * Y spans floor to ceiling, Z spans the wall length (cab to rear).
+ *
+ * For the LEFT wall: items are flush against minX (wallEat), extending in +X.
+ * For the RIGHT wall: items are flush against maxX (width - wallEat), extending in -X.
+ *
+ * This is a first-pass implementation using a side-wall AABB. The X position
+ * is constrained so the item's BACK touches the wall; the item extends into
+ * the interior and collides with floor/ceiling items normally. */
+export function computeWallEnvelope(shell: VanShell, wallSide: WallSide, itemDepth: number): Envelope {
+  const wallEat = shell.wallFramingThickness + shell.insulationThickness;
+  const minZ = Math.max(wallEat, shell.cabDepth);
+  const maxZ = shell.interiorLength - wallEat;
+  const minY = shell.floorBuildUpThickness;
+  const maxY = shell.interiorHeight - shell.ceilingFramingThickness;
+
+  let minX: number, maxX: number;
+  if (wallSide === 'left') {
+    minX = wallEat;
+    maxX = wallEat + itemDepth;
+  } else {
+    minX = shell.interiorWidth - wallEat - itemDepth;
+    maxX = shell.interiorWidth - wallEat;
+  }
+
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    minZ,
+    maxZ,
+    width: Math.max(0, maxX - minX),
+    height: Math.max(0, maxY - minY),
+    length: Math.max(0, maxZ - minZ),
+  };
+}
+
+/** The world X a wall-mounted item's footprint CENTER must sit at to be
+ * flush against the wall surface, given its (rotation-adjusted) width
+ * (the dimension extending inward from the wall). */
+export function requiredWallTouchX(shell: VanShell, wallSide: WallSide, widthW: number): number {
+  const wallEat = shell.wallFramingThickness + shell.insulationThickness;
+  if (wallSide === 'left') {
+    return wallEat + widthW / 2;
+  } else {
+    return shell.interiorWidth - wallEat - widthW / 2;
+  }
+}
+
+/** Corrects a wall-mounted item's position to the nearest position that's
+ * (a) within the wall's Y/Z bounds and (b) flush against it. For wall items,
+ * X is pinned to the wall surface; Y/Z can slide along the wall plane. */
+export function clampToWall(shell: VanShell, wallSide: WallSide, dims: Dims, pos: Vec3): Vec3 {
+  const env = computeWallEnvelope(shell, wallSide, dims.w);
+  const halfD = dims.d / 2;
+  const z = clamp(pos.z, env.minZ + halfD, Math.max(env.minZ + halfD, env.maxZ - halfD));
+  const y = clamp(pos.y, env.minY, Math.max(env.minY, env.maxY - dims.h));
+  return { x: requiredWallTouchX(shell, wallSide, dims.w), y, z };
+}
+
+export function wallLabel(wallSide: WallSide): string {
+  return wallSide === 'left' ? 'left wall' : 'right wall';
+}
+
 export function envelopeFor(shell: VanShell, mountSurface: MountSurface | undefined): Envelope {
   switch (mountSurface) {
     case 'roof':
@@ -111,6 +178,13 @@ export function envelopeFor(shell: VanShell, mountSurface: MountSurface | undefi
       // answer, so this generic form falls back to the interior envelope.
       // Every real call site for door-mounted items uses
       // computeDoorEnvelope directly instead.
+      return computeEnvelope(shell);
+    case 'wall':
+      // Wall envelopes depend on which side AND the mounted item's own
+      // depth (see computeWallEnvelope) — there's no single shell-only
+      // answer, so this generic form falls back to the interior envelope.
+      // Every real call site for wall-mounted items uses
+      // computeWallEnvelope directly instead.
       return computeEnvelope(shell);
     default:
       return computeEnvelope(shell);
@@ -191,12 +265,12 @@ function surfaceOf(def: ComponentDef | undefined): MountSurface {
 }
 
 /** Which physical space a surface's items occupy for collision purposes.
- * 'floor' and 'ceiling' items share the van interior and DO collide with
- * each other (a ceiling-hung monitor vs. a tall cabinet); roof, underbody
+ * 'floor', 'ceiling', and 'wall' items share the van interior and DO collide
+ * with each other (a wall-mounted panel vs. a tall cabinet); roof, underbody
  * and door items are each their own separate plane. */
 export type PhysicalPlane = 'interior' | 'roof' | 'underbody' | 'door';
 export function physicalPlane(surface: MountSurface): PhysicalPlane {
-  return surface === 'floor' || surface === 'ceiling' ? 'interior' : surface;
+  return surface === 'floor' || surface === 'ceiling' || surface === 'wall' ? 'interior' : surface;
 }
 function samePlane(a: ComponentDef | undefined, b: ComponentDef | undefined): boolean {
   return physicalPlane(surfaceOf(a)) === physicalPlane(surfaceOf(b));
@@ -471,8 +545,16 @@ export function computeClearances(
 ): Clearances {
   const surface = surfaceOf(targetDef);
   const targetDoorId = target.doorId ?? 'rear-left';
+  const targetWallSide = target.wallSide ?? 'left';
   const dims = rotatedDims(targetDef.dims, target.rotationY);
-  const env = surface === 'door' ? computeDoorEnvelope(shell, targetDoorId, dims.d) : envelopeFor(shell, targetDef.mountSurface);
+  let env: Envelope;
+  if (surface === 'door') {
+    env = computeDoorEnvelope(shell, targetDoorId, dims.d);
+  } else if (surface === 'wall') {
+    env = computeWallEnvelope(shell, targetWallSide, dims.w);
+  } else {
+    env = envelopeFor(shell, targetDef.mountSurface);
+  }
   const box = instanceAABB(target, targetDef);
 
   const obstacles: AABB[] = [];
@@ -493,6 +575,7 @@ export function computeClearances(
   // Door-mounted items are flush by construction (env's Z range is exactly
   // the item's own depth) — forward/back sweeps naturally come out ~0,
   // correctly reporting "no play toward/away from the door."
+  // Wall-mounted items are similarly flush — left/right sweeps come out ~0.
 
   return {
     left: sweepClearance(box, obstacles, 'x', -1, env.minX, env.maxX),
@@ -516,11 +599,12 @@ export function findViolations(
     roof: computeRoofEnvelope(shell),
     underbody: computeUnderbodyEnvelope(shell),
   };
-  const envelopeLabel: Record<'floor' | 'roof' | 'underbody' | 'ceiling', string> = {
+  const envelopeLabel: Record<'floor' | 'roof' | 'underbody' | 'ceiling' | 'wall', string> = {
     floor: 'buildable',
     ceiling: 'buildable',
     roof: 'roof',
     underbody: 'underbody',
+    wall: 'wall',
   };
   const cabZone = computeCabZone(shell);
   const wheelWellZones = computeWheelWellZones(shell);
@@ -558,12 +642,46 @@ export function findViolations(
       continue;
     }
 
-    const env = envBySurface[surface];
+    if (surface === 'wall') {
+      const wallSide = inst.wallSide ?? 'left';
+      const dims = rotatedDims(def.dims, inst.rotationY);
+      const env = computeWallEnvelope(shell, wallSide, dims.w);
+      const withinWall =
+        box.minY >= env.minY - 1e-6 &&
+        box.maxY <= env.maxY + 1e-6 &&
+        box.minZ >= env.minZ - 1e-6 &&
+        box.maxZ <= env.maxZ + 1e-6;
+      const expectedX = requiredWallTouchX(shell, wallSide, dims.w);
+      const flush = Math.abs(inst.pos.x - expectedX) < 1e-6;
+      if (!withinWall) {
+        violations.push({
+          type: 'out-of-bounds',
+          instanceIds: [inst.id],
+          message: `${inst.label ?? def.name} extends outside the ${wallLabel(wallSide)} bounds`,
+        });
+      } else if (!flush) {
+        violations.push({
+          type: 'out-of-bounds',
+          instanceIds: [inst.id],
+          message: `${inst.label ?? def.name} isn't flush against the ${wallLabel(wallSide)} — wall-mounted items must stay touching the wall`,
+        });
+      }
+      if (physicalPlane(surface) === 'interior' && aabbIntersects(box, cabZone)) {
+        violations.push({
+          type: 'obstacle',
+          instanceIds: [inst.id],
+          message: `${inst.label ?? def.name} overlaps the cab / front seat area`,
+        });
+      }
+      continue;
+    }
+
+    const env = envBySurface[surface as 'floor' | 'roof' | 'underbody' | 'ceiling'];
     if (!aabbWithinEnvelope(box, env)) {
       violations.push({
         type: 'out-of-bounds',
         instanceIds: [inst.id],
-        message: `${inst.label ?? def.name} extends outside the ${envelopeLabel[surface]} envelope`,
+        message: `${inst.label ?? def.name} extends outside the ${envelopeLabel[surface as 'floor' | 'roof' | 'underbody' | 'ceiling']} envelope`,
       });
     }
     if (surface === 'ceiling') {
@@ -710,6 +828,83 @@ function findNearestValidDoorPosition(
   return null;
 }
 
+/** Wall-mount variant of findNearestValidPosition: X is never searched (it's
+ * pinned flush by clampToWall/computeWallEnvelope) — only Y/Z, the two axes
+ * an item can actually slide along on the wall's face, and only against
+ * interior-plane obstacles (wall items collide with floor/ceiling items). */
+function findNearestValidWallPosition(
+  target: PlacedInstance,
+  targetDef: ComponentDef,
+  others: PlacedInstance[],
+  defsById: Record<string, ComponentDef>,
+  shell: VanShell,
+  matrix: OverlapMatrix,
+  stepIn: number
+): Vec3 | null {
+  const wallSide = target.wallSide ?? 'left';
+  const dims = rotatedDims(targetDef.dims, target.rotationY);
+  const env = computeWallEnvelope(shell, wallSide, dims.w);
+  const halfD = dims.d / 2;
+  const minCz = env.minZ + halfD;
+  const maxCz = env.maxZ - halfD;
+  const minCy = env.minY;
+  const maxCy = env.maxY - dims.h;
+  if (minCz > maxCz || minCy > maxCy) return null;
+  const x = requiredWallTouchX(shell, wallSide, dims.w);
+
+  const cabZone = computeCabZone(shell);
+  const wheelWellZones = computeWheelWellZones(shell);
+  const others2 = others.filter(
+    (o) => o.id !== target.id && physicalPlane(surfaceOf(defsById[o.defId])) === 'interior'
+  );
+
+  function isValid(y: number, z: number): boolean {
+    const box: AABB = {
+      minX: x - dims.w / 2,
+      maxX: x + dims.w / 2,
+      minY: y,
+      maxY: y + dims.h,
+      minZ: z - halfD,
+      maxZ: z + halfD,
+    };
+    if (aabbIntersects(box, cabZone)) return false;
+    if (!targetDef.wheelWellCutout) {
+      for (const zone of wheelWellZones) {
+        if (aabbIntersects(box, zone.box)) return false;
+      }
+    }
+    for (const other of others2) {
+      const oDef = defsById[other.defId];
+      if (!oDef) continue;
+      const oBox = instanceAABB(other, oDef);
+      if (aabbIntersects(box, oBox) && !overlapIsAllowed(target, targetDef, other, oDef, matrix)) return false;
+    }
+    return true;
+  }
+
+  const startZ = clamp(target.pos.z, minCz, maxCz);
+  const startY = clamp(target.pos.y, minCy, maxCy);
+  if (isValid(startY, startZ)) return { x, y: startY, z: startZ };
+
+  const maxRadius = Math.max(env.length, env.height) + stepIn;
+  for (let r = stepIn; r <= maxRadius; r += stepIn) {
+    const candidates: { y: number; z: number; dist: number }[] = [];
+    for (let dz = -r; dz <= r; dz += stepIn) {
+      for (let dy = -r; dy <= r; dy += stepIn) {
+        if (Math.max(Math.abs(dz), Math.abs(dy)) < r - stepIn / 2) continue;
+        const z = clamp(startZ + dz, minCz, maxCz);
+        const y = clamp(startY + dy, minCy, maxCy);
+        candidates.push({ y, z, dist: Math.hypot(dz, dy) });
+      }
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    for (const c of candidates) {
+      if (isValid(c.y, c.z)) return { x, y: c.y, z: c.z };
+    }
+  }
+  return null;
+}
+
 export function findNearestValidPosition(
   target: PlacedInstance,
   targetDef: ComponentDef,
@@ -722,6 +917,9 @@ export function findNearestValidPosition(
   const surface = surfaceOf(targetDef);
   if (surface === 'door') {
     return findNearestValidDoorPosition(target, targetDef, others, defsById, shell, matrix, stepIn);
+  }
+  if (surface === 'wall') {
+    return findNearestValidWallPosition(target, targetDef, others, defsById, shell, matrix, stepIn);
   }
   const env = envelopeFor(shell, targetDef.mountSurface);
   const isCeiling = surface === 'ceiling';

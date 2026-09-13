@@ -71,10 +71,11 @@ export const CATEGORY_COLORS: Record<Category, string> = {
  * tanks, other chassis-mounted gear); 'door' components mount to one of the
  * rear swing-door panels (e.g. a split A/C's interior unit) — they must stay
  * flush against that panel and swing with it when the door opens, unlike
- * roof/underbody which are static planes. Each is planned as its own layer,
- * combined on top of / below / hinged-to the van in the same scene, with its
- * own independent collision checking. */
-export type MountSurface = 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling';
+ * roof/underbody which are static planes; 'wall' components mount to the
+ * interior side walls (cam brackets, touch panels, small mounts). Each is
+ * planned as its own layer, combined on top of / below / hinged-to the van
+ * in the same scene, with its own independent collision checking. */
+export type MountSurface = 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling' | 'wall';
 
 /** 'ceiling' components live INSIDE the van (same physical space as 'floor'
  * items — they collide with beds, cabinets, the cab zone, etc.) but hang
@@ -85,19 +86,36 @@ export type MountSurface = 'floor' | 'roof' | 'underbody' | 'door' | 'ceiling';
  * free — "hug the ceiling" is enforced on every placement/move the same way
  * "flush against the door" is for 'door' items. Because Y is recomputed
  * whenever anything moves, lowering the bed above a ceiling item lowers
- * the item with it. */
-export const INTERIOR_SURFACES: readonly MountSurface[] = ['floor', 'ceiling'];
+ * the item with it.
+ *
+ * 'wall' components live INSIDE the van, mounted to a side wall — same
+ * collision space as floor/ceiling items but constrained to the wall plane. */
+export const INTERIOR_SURFACES: readonly MountSurface[] = ['floor', 'ceiling', 'wall'];
 
 /** Which rear swing-door panel a 'door'-mount instance is attached to. The
  * rear doors are two independent hinged panels (left half / right half of
  * rearDoorWidth) — an item must commit to one, it can't straddle both. */
 export type DoorId = 'rear-left' | 'rear-right';
 
+/** Which interior side wall a 'wall'-mount instance is attached to. Items
+ * mount flush against the wall surface (after insulation/framing), extending
+ * inward into the interior space. Default is 'left'. */
+export type WallSide = 'left' | 'right';
+
 export interface Dims {
   w: number; // across x (width) at rotation 0
   d: number; // along z (depth/length) at rotation 0
   h: number; // up y (height)
 }
+
+/** Purchase/inventory tracking status for a component definition. Tracks
+ * the lifecycle from initial idea through ownership:
+ * - 'proposed': wishlist/planning item, not yet committed
+ * - 'ordered': purchase placed, awaiting delivery
+ * - 'owned': in hand, ready to install
+ * - 'placed': installed in the van
+ * - 'superseded': replaced by another part, kept for reference */
+export type InventoryStatus = 'owned' | 'ordered' | 'proposed' | 'placed' | 'superseded';
 
 /** What kind of plumbing/electrical connection a port marker represents —
  * drives its marker color and default label in the 3D view. */
@@ -176,6 +194,25 @@ export interface ComponentDef {
    * sheet view. Free-form links buried in `notes` are also harvested there
    * as a fallback, but this is the canonical one. */
   url?: string;
+
+  // --- Inventory / purchase tracking ---
+  /** Purchase/inventory lifecycle status. When reading legacy JSON missing
+   * this field: treat as 'proposed' if status is 'placeholder', else 'owned'
+   * if placedCount > 0, else 'proposed'. New Capture/FAIT items default to
+   * 'proposed'. */
+  inventoryStatus?: InventoryStatus;
+  /** Actual order/receipt URL if different from the spec/buy link in `url`. */
+  orderUrl?: string;
+  /** ISO date string (YYYY-MM-DD) when the order was placed. */
+  orderDate?: string;
+  /** Vendor/supplier name for this part. */
+  vendor?: string;
+
+  // --- Tags ---
+  /** Free-form string tags for filtering/organization. Suggested vocabulary:
+   * fait, capture, structural, electrical, plumbing, kitchen, furniture,
+   * exterior, consumable. Any string is accepted — not a hard enum. */
+  tags?: string[];
 }
 
 export interface Vec3 {
@@ -200,6 +237,9 @@ export interface PlacedInstance {
    * mountSurface is 'door' — ignored otherwise. Defaults to 'rear-left' when
    * a door-mount instance omits it. */
   doorId?: DoorId;
+  /** Which interior side wall this is mounted on. Only meaningful when the
+   * def's mountSurface is 'wall' — ignored otherwise. Defaults to 'left'. */
+  wallSide?: WallSide;
 }
 
 export interface VanShell {
