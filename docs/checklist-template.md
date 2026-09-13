@@ -15,11 +15,11 @@ instances already at their target Qty.
 ## Table format
 
 ```markdown
-| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | URL | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| electrical | Lithium Battery (100Ah) | 2 | | | | | 450 | final | | Existing catalog match, just tracking qty/cost |
-| appliance | Isotherm CR85 Fridge | 1 | 20.7 | 18.1 | 20.7 | floor | 899 | final | | Replaces generic 12V Compressor Fridge |
-| plumbing | Grey water dump valve | 1 | TBD | TBD | TBD | underbody | TBD | placeholder | | Need to pick a model |
+| Category | Item | Qty | W | D | H | MountSurface | Cost | Status | InventoryStatus | Tags | Vendor | OrderUrl | OrderDate | URL | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| electrical | Lithium Battery (100Ah) | 2 | | | | | 450 | final | owned | electrical, fait | Amazon | | 2024-01-15 | | Existing catalog match, just tracking qty/cost |
+| appliance | Isotherm CR85 Fridge | 1 | 20.7 | 18.1 | 20.7 | floor | 899 | final | ordered | kitchen, capture | | | | | Replaces generic 12V Compressor Fridge |
+| plumbing | Grey water dump valve | 1 | TBD | TBD | TBD | underbody | TBD | placeholder | proposed | plumbing | | | | | Need to pick a model |
 ```
 
 - **Column order doesn't matter** and columns can be omitted — the importer
@@ -41,9 +41,14 @@ instances already at their target Qty.
 | `Item` | yes | Display name. If it names an existing catalog part (see below), match that name **exactly** so it's recognized as the same part rather than creating a duplicate. Otherwise use a specific, final-sounding name (brand/model when known) — this becomes the permanent name once Status is `final`. |
 | `Qty` | no (default 1) | How many instances of this exact item are needed. |
 | `W` / `D` / `H` | no | Footprint in inches at rotation 0 — W = across the van's width, D = along its length, H = up. Leave `TBD` if not known yet; the importer will create a 12×12×12" placeholder and flag it. |
-| `MountSurface` | no (default `floor`) | `floor`, `roof` (roof-mounted gear), or `underbody` (frame-mounted, e.g. tanks). |
+| `MountSurface` | no (default `floor`) | `floor`, `roof` (roof-mounted gear), `underbody` (frame-mounted, e.g. tanks), `door` (rear door), `ceiling` (ceiling-hung), or `wall` (side wall mount). |
 | `Cost` | no | Estimated unit cost in USD, plain number (no `$`/commas needed, they're stripped). `TBD` if unknown. |
 | `Status` | no (inferred) | `final` once name + dims + cost are all locked in, otherwise `placeholder`. If omitted, the importer infers it from whether dims/cost are filled in. |
+| `InventoryStatus` | no (inferred) | `proposed` (planning), `ordered` (awaiting delivery), `owned` (in hand), `placed` (installed), or `superseded` (replaced). New items without this field default to `proposed` if placeholder, else `owned` if placed, else `proposed`. |
+| `Tags` | no | Comma-separated tags for filtering. Suggested: `fait`, `capture`, `structural`, `electrical`, `plumbing`, `kitchen`, `furniture`, `exterior`, `consumable`. Any string is accepted. |
+| `Vendor` | no | Vendor/supplier name (Amazon, Home Depot, etc.). |
+| `OrderUrl` | no | Actual order/receipt URL if different from the spec/buy link. |
+| `OrderDate` | no | ISO date string (YYYY-MM-DD) when ordered. |
 | `URL` | no | Product / spec-sheet link (Amazon listing, manufacturer page). Header aliases: `Link`. Shows as a clickable link in the app's catalog sheet view. |
 | `Notes` | no | Anything relevant — wiring/plumbing dependencies, model links, install order, why this replaces a stock catalog part, etc. |
 

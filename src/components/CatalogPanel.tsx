@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { CATEGORIES, CATEGORY_COLORS } from '../types';
-import type { Category, MountSurface } from '../types';
+import type { Category, InventoryStatus, MountSurface } from '../types';
+
+const INVENTORY_STATUSES: InventoryStatus[] = ['proposed', 'ordered', 'owned', 'placed', 'superseded'];
 
 export default function CatalogPanel() {
   const defs = useStore((s) => s.defs);
@@ -84,9 +86,14 @@ export default function CatalogPanel() {
                     {d.mountSurface === 'underbody' && <span className="roof-badge underbody-badge">underbody</span>}
                     {d.mountSurface === 'door' && <span className="roof-badge">door</span>}
                     {d.mountSurface === 'ceiling' && <span className="roof-badge">ceiling</span>}
+                    {d.mountSurface === 'wall' && <span className="roof-badge">wall</span>}
+                    {d.inventoryStatus && d.inventoryStatus !== 'owned' && (
+                      <span className={`roof-badge inv-${d.inventoryStatus}`}>{d.inventoryStatus}</span>
+                    )}
                   </div>
                   <span className="dims">
                     {d.dims.w}×{d.dims.d}×{d.dims.h}"
+                    {d.tags && d.tags.length > 0 && <span className="tags-hint"> · {d.tags.slice(0, 2).join(', ')}{d.tags.length > 2 ? '…' : ''}</span>}
                   </span>
                 </div>
                 <div className="catalog-item-actions">
@@ -168,6 +175,7 @@ export default function CatalogPanel() {
                       <option value="underbody">Underbody (own layout plane)</option>
                       <option value="door">Rear door (swings open with the door)</option>
                       <option value="ceiling">Ceiling (hangs from above, hugs ceiling / bed underside)</option>
+                      <option value="wall">Wall (side wall mount, flush against wall)</option>
                     </select>
                   </div>
                   <div className="field-row">
@@ -207,6 +215,52 @@ export default function CatalogPanel() {
                       <option value="final">Final</option>
                       <option value="placeholder">Placeholder</option>
                     </select>
+                  </div>
+                  <div className="field-row">
+                    <label>Inventory</label>
+                    <select
+                      value={d.inventoryStatus ?? 'proposed'}
+                      onChange={(e) => updateDef(d.id, { inventoryStatus: e.target.value as InventoryStatus })}
+                    >
+                      {INVENTORY_STATUSES.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field-row">
+                    <label>Tags</label>
+                    <input
+                      type="text"
+                      placeholder="electrical, fait, capture…"
+                      value={(d.tags ?? []).join(', ')}
+                      onChange={(e) => updateDef(d.id, { tags: e.target.value ? e.target.value.split(',').map(t => t.trim()).filter(Boolean) : undefined })}
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label>Vendor</label>
+                    <input
+                      type="text"
+                      placeholder="Amazon, Home Depot…"
+                      value={d.vendor ?? ''}
+                      onChange={(e) => updateDef(d.id, { vendor: e.target.value || undefined })}
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label>Order URL</label>
+                    <input
+                      type="url"
+                      placeholder="order receipt/tracking link"
+                      value={d.orderUrl ?? ''}
+                      onChange={(e) => updateDef(d.id, { orderUrl: e.target.value.trim() || undefined })}
+                    />
+                  </div>
+                  <div className="field-row">
+                    <label>Order date</label>
+                    <input
+                      type="date"
+                      value={d.orderDate ?? ''}
+                      onChange={(e) => updateDef(d.id, { orderDate: e.target.value || undefined })}
+                    />
                   </div>
                   <div className="field-row">
                     <label>Overlap group</label>
@@ -297,6 +351,7 @@ export default function CatalogPanel() {
               <option value="underbody">Underbody (own layout plane)</option>
               <option value="door">Rear door (swings open with the door)</option>
               <option value="ceiling">Ceiling (hangs from above, hugs ceiling / bed underside)</option>
+              <option value="wall">Wall (side wall mount, flush against wall)</option>
             </select>
           </div>
           <div className="field-row">

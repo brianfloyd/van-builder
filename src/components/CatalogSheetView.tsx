@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
 import { CATEGORIES, CATEGORY_COLORS } from '../types';
-import type { Category, ComponentDef, MountSurface } from '../types';
+import type { Category, ComponentDef, InventoryStatus, MountSurface } from '../types';
+
+const INVENTORY_STATUSES: InventoryStatus[] = ['proposed', 'ordered', 'owned', 'placed', 'superseded'];
 
 /** Full-screen spreadsheet view of the component catalog — the same defs the
  * left-hand Catalog panel lists, but laid out as a sortable/filterable table
@@ -232,6 +234,7 @@ export default function CatalogSheetView() {
           <option value="roof">roof</option>
           <option value="underbody">underbody</option>
           <option value="door">door</option>
+          <option value="wall">wall</option>
         </select>
         <select value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
           <option value="all">Any status</option>

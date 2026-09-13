@@ -4,12 +4,15 @@ import {
   aabbIntersects,
   clamp,
   clampToCeiling,
+  clampToWall,
   computeCabZone,
   computeEnvelope,
+  computeWallEnvelope,
   computeWheelWellZones,
   ceilingHangY,
   findNearestValidPosition,
   physicalPlane,
+  requiredWallTouchX,
   snap,
 } from './geometry';
 import type { ComponentDef, PlacedInstance } from './types';
@@ -132,5 +135,78 @@ describe('findNearestValidPosition', () => {
     expect(found!.x).toBeGreaterThanOrEqual(env.minX);
     expect(found!.x).toBeLessThanOrEqual(env.maxX);
     expect(found!.z).toBeGreaterThanOrEqual(DEFAULT_SHELL.cabDepth);
+  });
+});
+
+describe('wall mount surface', () => {
+  it('physicalPlane maps wall to interior (same collision space as floor/ceiling)', () => {
+    expect(physicalPlane('wall')).toBe('interior');
+  });
+
+  it('computeWallEnvelope returns correct bounds for left wall', () => {
+    const itemWidth = 6;
+    const env = computeWallEnvelope(DEFAULT_SHELL, 'left', itemWidth);
+    const wallEat = DEFAULT_SHELL.wallFramingThickness + DEFAULT_SHELL.insulationThickness;
+    expect(env.minX).toBe(wallEat);
+    expect(env.maxX).toBe(wallEat + itemWidth);
+    expect(env.minZ).toBeGreaterThanOrEqual(DEFAULT_SHELL.cabDepth);
+    expect(env.minY).toBe(DEFAULT_SHELL.floorBuildUpThickness);
+  });
+
+  it('computeWallEnvelope returns correct bounds for right wall', () => {
+    const itemWidth = 6;
+    const env = computeWallEnvelope(DEFAULT_SHELL, 'right', itemWidth);
+    const wallEat = DEFAULT_SHELL.wallFramingThickness + DEFAULT_SHELL.insulationThickness;
+    expect(env.maxX).toBe(DEFAULT_SHELL.interiorWidth - wallEat);
+    expect(env.minX).toBe(DEFAULT_SHELL.interiorWidth - wallEat - itemWidth);
+  });
+
+  it('requiredWallTouchX returns the correct X for flush mounting', () => {
+    const itemWidth = 10;
+    const wallEat = DEFAULT_SHELL.wallFramingThickness + DEFAULT_SHELL.insulationThickness;
+    const leftX = requiredWallTouchX(DEFAULT_SHELL, 'left', itemWidth);
+    expect(leftX).toBe(wallEat + itemWidth / 2);
+    const rightX = requiredWallTouchX(DEFAULT_SHELL, 'right', itemWidth);
+    expect(rightX).toBe(DEFAULT_SHELL.interiorWidth - wallEat - itemWidth / 2);
+  });
+
+  it('clampToWall constrains position to wall bounds and sets X flush', () => {
+    const dims = { w: 8, d: 6, h: 10 };
+    const pos = { x: 50, y: 100, z: 500 };
+    const clamped = clampToWall(DEFAULT_SHELL, 'left', dims, pos);
+    const wallEat = DEFAULT_SHELL.wallFramingThickness + DEFAULT_SHELL.insulationThickness;
+    expect(clamped.x).toBe(wallEat + dims.w / 2);
+    expect(clamped.y).toBeLessThanOrEqual(DEFAULT_SHELL.interiorHeight - DEFAULT_SHELL.ceilingFramingThickness - dims.h);
+    expect(clamped.z).toBeLessThanOrEqual(DEFAULT_SHELL.interiorLength - wallEat - dims.d / 2);
+  });
+
+  it('findNearestValidPosition handles wall mount items', () => {
+    const wallDef: ComponentDef = {
+      id: 'panel',
+      name: 'Wall Panel',
+      category: 'other',
+      standard: true,
+      dims: { w: 4, d: 6, h: 8 },
+      mountSurface: 'wall',
+    };
+    const inst: PlacedInstance = {
+      id: 'w1',
+      defId: 'panel',
+      pos: { x: 50, y: 20, z: 80 },
+      rotationY: 0,
+      wallSide: 'left',
+    };
+    const found = findNearestValidPosition(
+      inst,
+      wallDef,
+      [],
+      { panel: wallDef },
+      DEFAULT_SHELL,
+      {},
+      4
+    );
+    expect(found).not.toBeNull();
+    const wallEat = DEFAULT_SHELL.wallFramingThickness + DEFAULT_SHELL.insulationThickness;
+    expect(found!.x).toBe(wallEat + wallDef.dims.w / 2);
   });
 });
